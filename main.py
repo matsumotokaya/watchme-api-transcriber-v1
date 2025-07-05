@@ -21,15 +21,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Whisperモデルをグローバルで一度だけ読み込む
+# Whisperモデルをグローバルで管理
 print("Whisperモデルを読み込み中...")
-model = whisper.load_model("large")
-print("Whisperモデル読み込み完了")
+models = {}
+# 標準モデル（medium）を初期ロード
+models["medium"] = whisper.load_model("medium")
+print("Whisper mediumモデル読み込み完了（標準）")
 
 # リクエストボディのモデル
 class FetchAndTranscribeRequest(BaseModel):
     device_id: str
     date: str
+    model: str = "medium"  # デフォルトはmedium、large指定可能
+
+# モデル取得関数
+def get_whisper_model(model_name: str = "medium"):
+    """
+    指定されたWhisperモデルを取得、未ロードの場合は動的ロード
+    """
+    if model_name not in ["medium", "large"]:
+        raise HTTPException(status_code=400, detail=f"サポートされていないモデル: {model_name}. 対応モデル: medium, large")
+    
+    if model_name not in models:
+        print(f"Whisper {model_name}モデルを読み込み中...")
+        models[model_name] = whisper.load_model(model_name)
+        print(f"Whisper {model_name}モデル読み込み完了")
+    
+    return models[model_name]
 
 
 @app.post("/fetch-and-transcribe")
@@ -39,6 +57,10 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
     """
     device_id = request.device_id
     date = request.date
+    model_name = request.model
+    
+    # 指定されたWhisperモデルを取得
+    whisper_model = get_whisper_model(model_name)
     
     # Mac環境のローカル出力ディレクトリのパス
     output_dir = f"/Users/kaya.matsumoto/data/data_accounts/{device_id}/{date}/transcriptions"
@@ -51,6 +73,7 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
         print(f"\n=== 一括取得・文字起こし開始 ===")
         print(f"デバイスID: {device_id}")
         print(f"対象日付: {date}")
+        print(f"Whisperモデル: {model_name}")
         print(f"出力ディレクトリ: {output_dir}")
         print(f"=" * 50)
         
@@ -92,7 +115,7 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
                                 fetched.append(f"{time_block}.wav")
                                 
                                 # Whisperで文字起こし
-                                result = model.transcribe(temp_file)
+                                result = whisper_model.transcribe(temp_file)
                                 transcription = result["text"]
                                 
                                 # JSONデータを作成
