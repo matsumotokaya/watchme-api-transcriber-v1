@@ -1,67 +1,81 @@
-# Whisper API for WatchMe - Vault連携専用
+# Whisper API for WatchMe - Vault統合専用版
 
-FastAPIを使用したWhisper音声文字起こしAPI（WatchMe統合システム - Vault連携専用）
+WatchMeエコシステム専用のWhisper音声文字起こしAPI。Vault APIとの完全統合により、音声データの取得から文字起こし、結果保存まで一貫した処理を提供します。
 
-## ⚠️ 重要な環境情報
+## 🔑 重要な特徴
 
-**このAPIは macOS システムPython 3.12 で動作します**
+### ✨ 単一エンドポイント設計
+- **POST /fetch-and-transcribe** のみ提供
+- Vault APIからの音声取得 → 文字起こし → Vault APIへの保存を一つの処理で完結
+- シンプルで信頼性の高いワークフロー
 
-- 使用Python: `/usr/local/bin/python3.12` (システムPython)
-- 仮想環境: **使用していません**
-- ポート: **8001** (WatchMeプロジェクトの標準ポート配置)
+### 🎯 高精度音声認識
+- **Whisper Large モデル** (1.55B パラメータ) を使用
+- 最高レベルの文字起こし精度を実現
+- 医療・心理分析用途に最適化
 
-### 依存関係のインストール
+### 🏗️ WatchMeエコシステム統合
+- iOS app → Vault API → Whisper API → Vault API の完全な処理チェーン
+- デバイスベースの識別システム (device_id)
+- 30分間隔の時間スロット処理 (48スロット/日)
 
+## 📋 システム要件
+
+### 開発環境 (macOS)
+- **Python**: 3.12 (システムPython)
+- **メモリ**: 8GB以上推奨
+- **ストレージ**: 5GB以上 (Whisperモデル用)
+
+### 本番環境 (EC2)
+- **OS**: Ubuntu 20.04/22.04
+- **インスタンス**: t3.large以上推奨 (2vCPU, 8GB RAM)
+- **メモリ**: 最低4GB、推奨8GB以上
+- **ストレージ**: 10GB以上
+- **ネットワーク**: Vault API (api.hey-watch.me) への接続
+
+## 🚀 インストール
+
+### macOS開発環境
 ```bash
-# システムPython 3.12環境にインストール
+# システムPython環境にインストール
 python3.12 -m pip install fastapi uvicorn openai-whisper aiohttp
 ```
 
-### なぜ仮想環境を使わないのか？
-
-- WatchMeプロジェクトの統合環境での動作が前提
-- システム全体でWhisperモデルを共有
-- 他のWatchMeコンポーネントとの連携のため
-
-## 機能概要
-
-**このAPIは Vault連携専用に特化されています**
-
-- **Vault APIからWAVファイルを取得**
-- **Whisper大規模モデル（large）による高精度文字起こし**
-- **結果をVault APIに自動アップロード**
-
-## インストール
-
-必要なパッケージをインストール：
-
+### EC2本番環境
 ```bash
-python3 -m pip install fastapi uvicorn openai-whisper aiohttp
+# システム更新
+sudo apt update && sudo apt upgrade -y
+
+# 必要パッケージ
+sudo apt install -y python3 python3-pip ffmpeg
+
+# Python依存関係
+pip3 install fastapi uvicorn openai-whisper aiohttp
 ```
 
-## 使用方法
+## 🎬 使用方法
 
-サーバーを起動：
-
+### サーバー起動
 ```bash
+# 開発環境
 python3.12 main.py
+
+# 本番環境
+python3 main.py
 ```
 
-または
+**サーバーURL**: `http://localhost:8001`
 
-```bash
-python main.py  # システムpythonがpython3.12を指している場合
-```
+### 初回起動について
+Whisper Largeモデルの読み込みに **1-3分** かかります。「Whisperモデル読み込み完了」が表示されるまでお待ちください。
 
-サーバーは `http://localhost:8001` で実行されます。
+## 📡 API仕様
 
-## 🔑 API エンドポイント
+### POST /fetch-and-transcribe
 
-### POST /fetch-and-transcribe（メインエンドポイント）
+WatchMeシステムのメイン処理エンドポイント。指定デバイス・日付の音声データを一括処理します。
 
-**EC2 Vault API (`https://api.hey-watch.me`) からWAVファイルを取得して一括文字起こしを実行**
-
-**リクエスト形式：**
+#### リクエスト
 ```json
 {
   "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
@@ -69,26 +83,28 @@ python main.py  # システムpythonがpython3.12を指している場合
 }
 ```
 
-**処理フロー：**
-1. **WAVファイル取得**: `GET /download?device_id={device_id}&date={date}&slot={time_slot}` を使用
-2. **48ファイル処理**: 00-00.wav から 23-30.wav まで30分間隔のスロット
-3. **Whisper文字起こし**: 大規模モデルで高精度な文字起こし実行
-4. **ローカル保存**: `/Users/kaya.matsumoto/data/data_accounts/{device_id}/{date}/transcriptions/`
-5. **EC2アップロード**: 処理済み`.json`ファイルを`https://api.hey-watch.me/upload-transcription`にアップロード
+#### 処理フロー
+1. **音声取得**: Vault APIから48個の時間スロット(00-00.wav～23-30.wav)を取得
+2. **文字起こし**: Whisper Largeモデルで高精度変換
+3. **ローカル保存**: 処理結果をJSONファイルとして一時保存
+4. **Vault保存**: 全てのJSONファイルをVault APIにアップロード
+5. **検証**: アップロード後の整合性確認
 
-**レスポンス：**
+#### レスポンス例
 ```json
 {
   "status": "success",
-  "fetched": ["00-00.wav", "00-30.wav"],
-  "processed": ["00-00.json", "00-30.json"],
-  "uploaded": ["00-00.json", "00-30.json"],
+  "fetched": ["02-00.wav", "02-30.wav", "11-00.wav", "13-30.wav"],
+  "processed": ["02-00.json", "02-30.json", "11-00.json", "13-30.json"],
+  "uploaded": ["02-00.json", "02-30.json", "11-00.json", "13-30.json"],
   "errors": [],
-  "upload_errors": []
+  "upload_errors": [],
+  "local_file_count": 4,
+  "verification_note": "アップロード検証を実行済み - ログを確認してください"
 }
 ```
 
-**使用例：**
+#### 使用例
 ```bash
 curl -X POST "http://localhost:8001/fetch-and-transcribe" \
   -H "Content-Type: application/json" \
@@ -98,48 +114,147 @@ curl -X POST "http://localhost:8001/fetch-and-transcribe" \
   }'
 ```
 
-## 出力ファイル形式
+## 📄 出力形式
 
-**JSONファイル構造：**
+### JSONファイル構造
 ```json
 {
-  "time_block": "00-00",
-  "transcription": "Whisperによる文字起こし結果"
+  "time_block": "02-00",
+  "transcription": "おはようございます。今日は良い天気ですね。"
 }
 ```
 
-## Swagger UI ドキュメント
+### ファイル保存場所
+- **開発環境**: `/Users/kaya.matsumoto/data/data_accounts/{device_id}/{date}/transcriptions/`
+- **本番環境**: `/home/ubuntu/data/data_accounts/{device_id}/{date}/transcriptions/`
 
-API ドキュメントは以下のURLでアクセスできます：
-http://localhost:8001/docs
+## ⚙️ Whisperモデル詳細
 
-## トラブルシューティング
+### 使用モデル: **Large**
+- **パラメータ数**: 1,550M (15.5億)
+- **精度**: 最高レベル
+- **処理速度**: 低速 (高精度優先)
+- **メモリ使用量**: ~3GB (モデル) + ~1-2GB (処理)
 
-### ModuleNotFoundError: No module named 'aiohttp'
+### モデル比較表
+| モデル | パラメータ | 精度 | 速度 | 用途 |
+|--------|-----------|------|------|------|
+| tiny | 39M | ⭐⭐ | ⭐⭐⭐⭐⭐ | リアルタイム |
+| base | 74M | ⭐⭐⭐ | ⭐⭐⭐⭐ | 軽量 |
+| small | 244M | ⭐⭐⭐⭐ | ⭐⭐⭐ | バランス |
+| medium | 769M | ⭐⭐⭐⭐⭐ | ⭐⭐ | 高精度 |
+| **large** | **1550M** | **⭐⭐⭐⭐⭐** | **⭐** | **最高精度** |
 
-このエラーが発生した場合は、システムPython環境にaiohttpをインストールしてください：
+### なぜLargeモデル？
+- **医療・心理分析**: 精度が最重要
+- **バッチ処理**: リアルタイム性より品質優先
+- **WatchMeシステム**: 高品質データが後続処理の精度向上に寄与
 
-```bash
-python3.12 -m pip install aiohttp
+## 🌐 本番運用 (EC2)
+
+### ⚠️ 本番デプロイ前の必須修正
+
+現在のコードはmacOS開発環境用のため、EC2では以下の修正が必要です：
+
+```python
+# main.py の44行目を修正
+# 修正前（macOS用）
+output_dir = f"/Users/kaya.matsumoto/data/data_accounts/{device_id}/{date}/transcriptions"
+
+# 修正後（EC2用）
+output_dir = f"/home/ubuntu/data/data_accounts/{device_id}/{date}/transcriptions"
 ```
 
-### Whisperモデルの読み込みに時間がかかる
+### EC2インスタンス推奨
 
-初回起動時やモデル変更時は、Whisperの大規模モデル（large）の読み込みに1-2分程度かかる場合があります。「Whisperモデル読み込み完了」が表示されるまでお待ちください。
+| インスタンス | vCPU | RAM | 時間コスト | 月額概算 | 推奨用途 |
+|-------------|------|-----|-----------|----------|----------|
+| t3.large | 2 | 8GB | $0.08 | ~$60 | 開発・テスト |
+| c5.xlarge | 4 | 8GB | $0.17 | ~$125 | 小規模本番 |
+| c5.2xlarge | 8 | 16GB | $0.34 | ~$250 | 大規模本番 |
 
-### ポート8001が使用中
+### 💰 コスト最適化案
+1. **モデル変更**: Large → Medium (精度僅差、速度2倍、コスト半減)
+2. **Spot Instance**: 最大90%削減
+3. **スケジュール起動**: 夜間停止で30-50%削減
 
-WatchMeプロジェクトの他のコンポーネントとのポート競合を避けるため、ポート8001を使用しています。他のサービスでポート8001が使用されている場合は、そのサービスを停止してください。
+## 🔧 開発者向け情報
 
-## システム要件
+### API設計思想
+- **単一責任**: 1つのエンドポイントで完結
+- **統合優先**: Vaultとの密結合設計
+- **エラー透明性**: 詳細なログと状況報告
 
-- macOS環境
-- Python 3.12
-- 十分なメモリ容量（Whisper large モデル用）
-- インターネット接続（Vault API連携用）
+### デバッグ情報
+- **Swagger UI**: `http://localhost:8001/docs`
+- **ログ出力**: 処理状況を詳細表示
+- **検証機能**: アップロード後の整合性確認
 
-## 注意事項
+### セキュリティ
+- **SSL無効化**: 内部通信用 (aiohttp.TCPConnector(ssl=False))
+- **CORS有効**: 開発環境用
 
-- このAPIはVault連携専用に設計されています
-- 単体ファイルアップロード機能は提供していません
-- ローカルファイル処理機能は提供していません
+## 🔍 トラブルシューティング
+
+### よくある問題
+
+#### 1. メモリ不足
+```bash
+# エラー例
+OutOfMemoryError: CUDA out of memory
+
+# 対処法
+- インスタンスサイズ拡大
+- 他プロセス停止
+- swapファイル作成
+```
+
+#### 2. モデル読み込み失敗
+```bash
+# 対処法
+pip3 install --upgrade openai-whisper
+python3 -c "import whisper; whisper.load_model('large')"
+```
+
+#### 3. 依存関係エラー
+```bash
+# Ubuntu環境
+sudo apt install -y ffmpeg
+pip3 install torch torchvision torchaudio
+```
+
+#### 4. ポート競合
+```bash
+# ポート確認
+sudo lsof -i :8001
+
+# プロセス終了
+sudo kill -9 <PID>
+```
+
+## 📊 パフォーマンス
+
+### 処理時間目安 (Largeモデル)
+- **1分音声**: ~10-15秒
+- **30分音声**: ~5-8分
+- **1日分 (48ファイル)**: ~4-6時間
+
+### 最適化のヒント
+- **並列処理**: 複数ファイル同時処理 (メモリ許可範囲)
+- **キャッシュ**: モデルの永続化
+- **バッチサイズ**: メモリ使用量に応じて調整
+
+## 📞 サポート
+
+### システム統合
+このAPIはWatchMeエコシステムの一部です：
+- **iOS App** → **Vault API** → **Whisper API** → **分析システム**
+
+### 技術仕様
+- **FastAPI**: 3.10+
+- **Whisper**: OpenAI公式実装
+- **Python**: 3.12 (システム推奨)
+
+---
+
+**注意**: このAPIはVault連携専用です。単体ファイル処理や独立利用は想定していません。
