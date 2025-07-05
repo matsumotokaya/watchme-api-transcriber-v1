@@ -34,6 +34,37 @@ WatchMeエコシステム専用のWhisper音声文字起こしAPI。Vault APIと
 - **ストレージ**: 10GB以上
 - **ネットワーク**: Vault API (api.hey-watch.me) への接続
 
+## 💾 容量要件詳細
+
+### APIコード本体
+- **サイズ**: 約350KB
+- **内容**: Pythonコード、README、設定ファイル
+- **注意**: 仮想環境（venv）は**使用しません**
+
+### Whisperモデルキャッシュ
+モデルは `~/.cache/whisper/` に自動保存されます：
+
+| モデル | ファイル名 | サイズ | 初回ダウンロード |
+|--------|-----------|--------|-----------------|
+| **medium** | medium.pt | **1.4GB** | 起動時 |
+| **large** | large-v3.pt | **2.9GB** | 初回使用時 |
+| **合計** | - | **4.3GB** | - |
+
+### ディスク容量管理
+```bash
+# APIディレクトリサイズ確認
+du -sh /path/to/api_wisper_v1
+# → 約350KB（コードのみ）
+
+# Whisperキャッシュ確認
+du -sh ~/.cache/whisper/
+# → 約4.3GB（2モデル）
+
+# 不要モデル削除（必要に応じて）
+rm ~/.cache/whisper/base.pt    # 使用しない場合
+rm ~/.cache/whisper/small.pt   # 使用しない場合
+```
+
 ## 🚀 インストール
 
 ### macOS開発環境
