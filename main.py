@@ -10,8 +10,23 @@ from datetime import datetime
 import glob
 import aiohttp
 import asyncio
+from supabase import create_client, Client
+from dotenv import load_dotenv
 
-app = FastAPI(title="Whisper API for WatchMe", description="WatchMe統合システム用Whisper音声文字起こしAPI - Vault連携専用")
+# 環境変数を読み込み
+load_dotenv()
+
+app = FastAPI(title="Whisper API for WatchMe", description="WatchMe統合システム用Whisper音声文字起こしAPI - Supabase連携専用")
+
+# Supabaseクライアントの初期化
+supabase_url = os.getenv('SUPABASE_URL')
+supabase_key = os.getenv('SUPABASE_KEY')
+
+if not supabase_url or not supabase_key:
+    raise ValueError("SUPABASE_URLおよびSUPABASE_KEYが設定されていません")
+
+supabase: Client = create_client(supabase_url, supabase_key)
+print(f"Supabase接続設定完了: {supabase_url}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -62,11 +77,7 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
     # 指定されたWhisperモデルを取得
     whisper_model = get_whisper_model(model_name)
     
-    # Mac環境のローカル出力ディレクトリのパス
-    output_dir = f"/Users/kaya.matsumoto/data/data_accounts/{device_id}/{date}/transcriptions"
-    
-    # 出力ディレクトリを作成（存在しない場合）
-    os.makedirs(output_dir, exist_ok=True)
+    print(f"Supabaseへの直接保存モードで実行中")
     
     # 一時ディレクトリを作成
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -74,15 +85,17 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
         print(f"デバイスID: {device_id}")
         print(f"対象日付: {date}")
         print(f"Whisperモデル: {model_name}")
-        print(f"出力ディレクトリ: {output_dir}")
+        print(f"保存先: Supabase transcriptions テーブル")
         print(f"=" * 50)
         
         fetched = []
         processed = []
         skipped = []
         errors = []
+        saved_to_supabase = []
         
         # 時間ブロックのリスト（00-00から23-30まで）
+        # 重要: ほとんどの時間スロットではデータが存在しないのが正常
         time_blocks = [f"{hour:02d}-{minute:02d}" for hour in range(24) for minute in [0, 30]]
         
         # SSL検証をスキップするコネクターを作成（音声ファイル取得用）
@@ -90,50 +103,56 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
         async with aiohttp.ClientSession(connector=connector) as session:
             for time_block in time_blocks:
                 try:
-                    # 出力ファイルパス
-                    output_file = os.path.join(output_dir, f"{time_block}.json")
+                    print(f"📝 処理開始: {time_block}")
                     
-                    # 既存ファイル確認（スキップせずに処理継続）
-                    if os.path.exists(output_file):
-                        print(f"📄 既存ファイル検出: {time_block}.json (音声取得をスキップ、アップロード対象に追加)")
-                        processed.append(f"{time_block}.json")
-                    else:
-                        print(f"📝 新規ファイル作成: {time_block}.json")
-                        
-                        # 音声ファイルのURL（/downloadエンドポイントを使用）
-                        url = f"https://api.hey-watch.me/download?device_id={device_id}&date={date}&slot={time_block}"
-                        
-                        # 音声ファイルの取得
-                        async with session.get(url) as response:
-                            if response.status == 200:
-                                # 一時ファイルに保存
-                                temp_file = os.path.join(temp_dir, f"{time_block}.wav")
-                                with open(temp_file, 'wb') as f:
-                                    f.write(await response.read())
-                                
-                                print(f"📥 取得: {time_block}.wav")
-                                fetched.append(f"{time_block}.wav")
-                                
-                                # Whisperで文字起こし
-                                result = whisper_model.transcribe(temp_file)
-                                transcription = result["text"]
-                                
-                                # JSONデータを作成
-                                transcription_data = {
+                    # 音声ファイルのURL（/downloadエンドポイントを使用）
+                    url = f"https://api.hey-watch.me/download?device_id={device_id}&date={date}&slot={time_block}"
+                    
+                    # 音声ファイルの取得
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            # 一時ファイルに保存
+                            temp_file = os.path.join(temp_dir, f"{time_block}.wav")
+                            with open(temp_file, 'wb') as f:
+                                f.write(await response.read())
+                            
+                            print(f"📥 取得: {time_block}.wav")
+                            fetched.append(f"{time_block}.wav")
+                            
+                            # Whisperで文字起こし
+                            result = whisper_model.transcribe(temp_file)
+                            transcription = result["text"]
+                            
+                            # Supabaseに直接保存
+                            try:
+                                supabase_data = {
+                                    "device_id": device_id,
+                                    "date": date,
                                     "time_block": time_block,
                                     "transcription": transcription
                                 }
                                 
-                                # JSONファイルに保存
-                                with open(output_file, 'w', encoding='utf-8') as f:
-                                    json.dump(transcription_data, f, ensure_ascii=False, indent=2)
+                                supabase_result = supabase.table('vibe_whisper').insert(supabase_data).execute()
                                 
-                                print(f"💾 JSONファイル生成完了: {output_file}")
-                                print(f"📄 ファイルサイズ: {os.path.getsize(output_file)} bytes")
-                                
-                                processed.append(f"{time_block}.json")
-                                print(f"✅ 完了: {time_block}.json ({len(transcription)} 文字)")
-                                
+                                if supabase_result.data:
+                                    print(f"💾 Supabase保存完了: {time_block}")
+                                    print(f"📄 文字起こし結果: {len(transcription)} 文字")
+                                    saved_to_supabase.append(f"{time_block}")
+                                    processed.append(f"{time_block}")
+                                    print(f"✅ 完了: {time_block} ({len(transcription)} 文字)")
+                                else:
+                                    print(f"❌ Supabase保存失敗: {time_block}")
+                                    errors.append(f"{time_block}")
+                                    
+                            except Exception as supabase_error:
+                                print(f"❌ Supabase保存エラー: {time_block} - {str(supabase_error)}")
+                                errors.append(f"{time_block}")
+                            
+                        else:
+                            if response.status == 404:
+                                # 404は正常な動作: 測定されていない時間スロットでは音声データが存在しない
+                                print(f"⏭️ データなし: {time_block}.wav (測定されていません)")
+                                skipped.append(f"{time_block}.wav")
                             else:
                                 print(f"❌ 取得失敗: {time_block}.wav (ステータス: {response.status})")
                                 errors.append(f"{time_block}.wav")
@@ -142,137 +161,29 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
                     print(f"❌ エラー: {time_block} - {str(e)}")
                     errors.append(f"{time_block}.wav")
         
-        # ローカルに存在する全てのJSONファイルをEC2にアップロード
-        uploaded = []
-        upload_errors = []
-        
-        # ローカルJSONファイルを確認
-        local_json_files = glob.glob(os.path.join(output_dir, "*.json"))
-        
-        print(f"\n=== アップロード前状況確認 ===")
-        print(f"📝 アップロード対象: {len(processed)} ファイル (新規 + 既存)")
-        print(f"❌ 音声取得エラー: {len(errors)} ファイル") 
-        print(f"📁 ローカル存在: {len(local_json_files)} ファイル")
-        print(f"=" * 50)
-        
-        if local_json_files:
-            print(f"\n=== EC2へのアップロード開始 ===")
-            print(f"アップロード対象: {len(local_json_files)} ファイル")
-            print(f"=" * 50)
-            
-            # SSL検証をスキップするコネクターを作成（EC2アップロード用）
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                for json_path in local_json_files:
-                    try:
-                        json_filename = os.path.basename(json_path)
-                        time_block = json_filename.replace('.json', '')
-                        
-                        # JSONファイルをEC2にアップロード
-                        print(f"🚀 アップロード開始: {json_filename}")
-                        print(f"📁 ローカルファイルパス: {json_path}")
-                        print(f"📏 ファイルサイズ: {os.path.getsize(json_path)} bytes")
-                        
-                        with open(json_path, 'rb') as f:
-                            data = aiohttp.FormData()
-                            # ファイル本体
-                            data.add_field(
-                                "file", 
-                                f, 
-                                filename=f"{time_block}.json",
-                                content_type="application/json"
-                            )
-                            # 保存先情報を指定
-                            data.add_field("device_id", device_id)
-                            data.add_field("date", date)
-                            data.add_field("time_block", time_block)
-                            
-                            print(f"📤 POST送信先: https://api.hey-watch.me/upload-transcription")
-                            print(f"📋 ファイル名: {time_block}.json")
-                            print(f"📱 デバイスID: {device_id}")
-                            print(f"📅 対象日付: {date}")
-                            print(f"🕒 時間ブロック: {time_block}")
-                            
-                            async with session.post("https://api.hey-watch.me/upload-transcription", data=data) as upload_response:
-                                response_text = await upload_response.text()
-                                print(f"📡 レスポンスステータス: {upload_response.status}")
-                                print(f"📄 レスポンス本文: {response_text}")
-                                print(f"🏷️ レスポンスヘッダー: {dict(upload_response.headers)}")
-                                
-                                if upload_response.status == 200:
-                                    uploaded.append(json_filename)
-                                    print(f"✅ アップロード成功: {json_filename}")
-                                    
-                                    # アップロード直後の検証
-                                    print(f"🔍 アップロード後検証開始: {json_filename}")
-                                    await asyncio.sleep(1)  # サーバー処理待ち
-                                    
-                                    verify_url = f"https://api.hey-watch.me/download?device_id={device_id}&date={date}&slot={time_block}&type=json"
-                                    try:
-                                        async with session.get(verify_url) as verify_response:
-                                            if verify_response.status == 200:
-                                                verify_content = await verify_response.text()
-                                                print(f"✅ 検証成功: {json_filename} - EC2で確認済み")
-                                                print(f"   - ファイルサイズ: {len(verify_content)} bytes")
-                                            else:
-                                                print(f"⚠️ 検証失敗: {json_filename} - EC2で見つからない")
-                                                print(f"   - 検証ステータス: {verify_response.status}")
-                                    except Exception as verify_error:
-                                        print(f"❌ 検証エラー: {json_filename} - {str(verify_error)}")
-                                    
-                                else:
-                                    upload_errors.append(json_filename)
-                                    print(f"❌ アップロード失敗: {json_filename}")
-                                    print(f"   - ステータスコード: {upload_response.status}")
-                                    print(f"   - エラー詳細: {response_text}")
-                    
-                    except Exception as e:
-                        upload_errors.append(json_filename)
-                        print(f"❌ アップロード例外エラー: {json_filename}")
-                        print(f"   - エラータイプ: {type(e).__name__}")
-                        print(f"   - エラー詳細: {str(e)}")
-                        print(f"   - ファイル存在確認: {os.path.exists(json_path)}")
-                        if os.path.exists(json_path):
-                            print(f"   - ファイルサイズ: {os.path.getsize(json_path)} bytes")
-            
-            print(f"\n=== EC2アップロード完了 ===")
-            print(f"🚀 アップロード成功: {len(uploaded)} ファイル")
-            print(f"❌ アップロード失敗: {len(upload_errors)} ファイル")
-            print(f"=" * 50)
-        
-        # ローカルに残っている未送信JSONファイルを確認
-        print(f"\n=== ローカルファイル状況確認 ===")
-        print(f"📁 ローカルディレクトリ: {output_dir}")
-        print(f"📄 ローカルJSONファイル数: {len(local_json_files)}")
-        
-        if local_json_files:
-            for json_file in sorted(local_json_files):
-                filename = os.path.basename(json_file)
-                file_size = os.path.getsize(json_file)
-                upload_status = "✅ アップロード済み" if filename in uploaded else "❌ 未アップロード"
-                print(f"   - {filename}: {file_size} bytes ({upload_status})")
-        
-        print(f"=" * 50)
-        
-        print(f"\n=== 一括取得・文字起こし・アップロード完了 ===")
+        print(f"\n=== 一括取得・文字起こし・Supabase保存完了 ===")
         print(f"📥 音声取得成功: {len(fetched)} ファイル")
-        print(f"📝 アップロード対象: {len(processed)} ファイル (新規 + 既存)")
-        print(f"🚀 アップロード成功: {len(uploaded)} ファイル")
-        print(f"❌ 音声取得エラー: {len(errors)} ファイル")
-        print(f"❌ アップロードエラー: {len(upload_errors)} ファイル")
-        print(f"📄 ローカル残存JSONファイル: {len(local_json_files)} ファイル")
+        print(f"📝 処理対象: {len(processed)} ファイル")
+        print(f"💾 Supabase保存成功: {len(saved_to_supabase)} ファイル")
+        print(f"⏭️ スキップ: {len([s for s in skipped if not s.endswith('.wav')])} ファイル (既存データ)")
+        print(f"📭 データなし: {len([s for s in skipped if s.endswith('.wav')])} ファイル (測定なし)")
+        print(f"❌ エラー: {len(errors)} ファイル")
         print(f"=" * 50)
         
         return {
             "status": "success",
             "fetched": fetched,
             "processed": processed,
-            "uploaded": uploaded,
+            "saved_to_supabase": saved_to_supabase,
+            "skipped": skipped,
             "errors": errors,
-            "upload_errors": upload_errors,
-            "local_files": [os.path.basename(f) for f in local_json_files],
-            "local_file_count": len(local_json_files),
-            "verification_note": "アップロード検証を実行済み - ログを確認してください"
+            "summary": {
+                "total_time_blocks": len(time_blocks),
+                "audio_fetched": len(fetched),
+                "supabase_saved": len(saved_to_supabase),
+                "skipped_existing": len(skipped),
+                "errors": len(errors)
+            }
         }
 
 

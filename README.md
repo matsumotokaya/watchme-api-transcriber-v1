@@ -1,12 +1,12 @@
-# Whisper API for WatchMe - Vault統合専用版
+# Whisper API for WatchMe - Supabase統合版
 
-WatchMeエコシステム専用のWhisper音声文字起こしAPI。Vault APIとの完全統合により、音声データの取得から文字起こし、結果保存まで一貫した処理を提供します。
+WatchMeエコシステム専用のWhisper音声文字起こしAPI。Vault APIからの音声取得とSupabaseへの直接保存により、音声データの取得から文字起こし、結果保存まで一貫した処理を提供します。
 
 ## 🔑 重要な特徴
 
 ### ✨ 単一エンドポイント設計
 - **POST /fetch-and-transcribe** のみ提供
-- Vault APIからの音声取得 → 文字起こし → Vault APIへの保存を一つの処理で完結
+- Vault APIからの音声取得 → 文字起こし → Supabaseへの直接保存を一つの処理で完結
 - シンプルで信頼性の高いワークフロー
 
 ### 🎯 高精度音声認識
@@ -16,9 +16,10 @@ WatchMeエコシステム専用のWhisper音声文字起こしAPI。Vault APIと
 - 医療・心理分析用途に最適化
 
 ### 🏗️ WatchMeエコシステム統合
-- iOS app → Vault API → Whisper API → Vault API の完全な処理チェーン
+- iOS app → Vault API → Whisper API → Supabase の完全な処理チェーン
 - デバイスベースの識別システム (device_id)
 - 30分間隔の時間スロット処理 (48スロット/日)
+- Supabaseへの直接保存でリアルタイムデータアクセス
 
 ## 📋 システム要件
 
@@ -111,6 +112,11 @@ Whisperモデルの読み込み時間：
 
 WatchMeシステムのメイン処理エンドポイント。指定デバイス・日付の音声データを一括処理します。
 
+**⚠️ 重要な仕様**:
+- **404エラーは正常動作**: 測定されていない時間スロットでは404が返りますが、これはエラーではありません
+- **データなし = 正常**: ほとんどの時間スロットではデータが存在しないのが通常の状態です
+- **スキップ処理**: 存在しないデータは自動的にスキップされ、存在するデータのみが処理されます
+
 #### リクエスト
 ```json
 {
@@ -130,22 +136,28 @@ WatchMeシステムのメイン処理エンドポイント。指定デバイス�
 #### 処理フロー
 1. **モデル選択**: 指定されたWhisperモデル（medium/large）を動的ロード
 2. **音声取得**: Vault APIから48個の時間スロット(00-00.wav～23-30.wav)を取得
+   - **重要**: 404エラーは正常な動作です（測定されていない時間スロット）
+   - 存在するデータのみを処理し、存在しないデータは自動的にスキップされます
 3. **文字起こし**: 選択されたWhisperモデルで文字起こし実行
-4. **ローカル保存**: 処理結果をJSONファイルとして一時保存
-5. **Vault保存**: 全てのJSONファイルをVault APIにアップロード
-6. **検証**: アップロード後の整合性確認
+4. **Supabase保存**: 処理結果をSupabaseのvibe_whisperテーブルに直接保存
+5. **結果報告**: 処理結果の詳細を返却
 
 #### レスポンス例
 ```json
 {
   "status": "success",
-  "fetched": ["02-00.wav", "02-30.wav", "11-00.wav", "13-30.wav"],
-  "processed": ["02-00.json", "02-30.json", "11-00.json", "13-30.json"],
-  "uploaded": ["02-00.json", "02-30.json", "11-00.json", "13-30.json"],
+  "fetched": ["18-00.wav", "18-30.wav"],
+  "processed": ["18-00", "18-30"],
+  "saved_to_supabase": ["18-00", "18-30"],
+  "skipped": ["00-00.wav", "00-30.wav", "01-00.wav", "..."],
   "errors": [],
-  "upload_errors": [],
-  "local_file_count": 4,
-  "verification_note": "アップロード検証を実行済み - ログを確認してください"
+  "summary": {
+    "total_time_blocks": 48,
+    "audio_fetched": 2,
+    "supabase_saved": 2,
+    "skipped_existing": 46,
+    "errors": 0
+  }
 }
 ```
 
@@ -174,17 +186,26 @@ curl -X POST "http://localhost:8001/fetch-and-transcribe" \
 
 ## 📄 出力形式
 
-### JSONファイル構造
+### Supabaseテーブル構造 (vibe_whisper)
+```sql
+CREATE TABLE vibe_whisper (
+  device_id     text not null,
+  date          date not null,
+  time_block    text not null check (time_block ~ '^[0-2][0-9]-[0-5][0-9]$'),
+  transcription text,
+  primary key (device_id, date, time_block)
+);
+```
+
+### データ保存例
 ```json
 {
-  "time_block": "02-00",
+  "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
+  "date": "2025-07-06",
+  "time_block": "18-00",
   "transcription": "おはようございます。今日は良い天気ですね。"
 }
 ```
-
-### ファイル保存場所
-- **開発環境**: `/Users/kaya.matsumoto/data/data_accounts/{device_id}/{date}/transcriptions/`
-- **本番環境**: `/home/ubuntu/data/data_accounts/{device_id}/{date}/transcriptions/`
 
 ## ⚙️ Whisperモデル詳細
 
@@ -327,13 +348,14 @@ sudo kill -9 <PID>
 
 ### システム統合
 このAPIはWatchMeエコシステムの一部です：
-- **iOS App** → **Vault API** → **Whisper API** → **分析システム**
+- **iOS App** → **Vault API** → **Whisper API** → **Supabase** → **分析システム**
 
 ### 技術仕様
-- **FastAPI**: 3.10+
-- **Whisper**: OpenAI公式実装
+- **FastAPI**: 0.109.2
+- **Whisper**: OpenAI公式実装 (20231117)
 - **Python**: 3.12 (システム推奨)
+- **Supabase**: 2.13.0
 
 ---
 
-**注意**: このAPIはVault連携専用です。単体ファイル処理や独立利用は想定していません。
+**注意**: このAPIはVault連携とSupabase統合専用です。単体ファイル処理や独立利用は想定していません。
