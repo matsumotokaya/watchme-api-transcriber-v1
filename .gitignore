@@ -45,4 +45,8 @@ ehthumbs.db
 Thumbs.db
 
 # Environment variables
-.env 
+.env
+
+# Logs
+logs/
+*.log 

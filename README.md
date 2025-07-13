@@ -359,3 +359,218 @@ sudo kill -9 <PID>
 ---
 
 **注意**: このAPIはVault連携とSupabase統合専用です。単体ファイル処理や独立利用は想定していません。
+
+## 🚀 本番環境デプロイ手順（EC2 + Docker + systemd）
+
+### 前提条件
+- EC2インスタンス（Ubuntu 20.04/22.04）
+- t3.large以上推奨（メモリ不足の場合はbaseモデルを使用）
+- Docker/Docker Composeインストール済み
+
+### デプロイ手順
+
+#### 1. プロジェクトのアップロード
+```bash
+# ローカルでプロジェクトを圧縮
+tar -czf api_wisper_v1.tar.gz api_wisper_v1
+
+# EC2にアップロード
+scp -i ~/your-key.pem api_wisper_v1.tar.gz ubuntu@your-ec2-ip:~/
+
+# EC2で解凍
+ssh -i ~/your-key.pem ubuntu@your-ec2-ip
+tar -xzf api_wisper_v1.tar.gz
+cd api_wisper_v1
+```
+
+#### 2. 環境変数の設定
+```bash
+# .envファイルを作成
+cp .env.example .env
+
+# .envファイルを編集
+nano .env
+# 以下を設定:
+# SUPABASE_URL=https://your-project.supabase.co
+# SUPABASE_KEY=your-supabase-anon-key
+```
+
+#### 3. メモリ不足対策（必要な場合）
+
+EC2インスタンスのメモリが少ない場合（2GB以下）、スワップメモリを追加：
+
+```bash
+# 2GBのスワップファイルを作成
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+
+# 永続化
+echo '/swapfile swap swap defaults 0 0' | sudo tee -a /etc/fstab
+```
+
+#### 4. Whisperモデルの変更（メモリ制限時）
+
+デフォルトはmediumモデルですが、メモリが限られている場合はbaseモデルに変更：
+
+```bash
+# main.pyを編集
+sed -i 's/"medium"/"base"/g' main.py
+```
+
+#### 5. Dockerイメージのビルドと起動
+```bash
+# Dockerイメージをビルド
+sudo docker-compose build
+
+# コンテナを起動
+sudo docker-compose up -d
+
+# ログ確認
+sudo docker-compose logs -f
+```
+
+### systemdサービスとして登録（常時起動）
+
+#### 1. systemdサービスファイルの作成
+```bash
+sudo tee /etc/systemd/system/api-wisper.service << 'EOF'
+[Unit]
+Description=API Wisper v1 - Whisper Speech Recognition Service
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+WorkingDirectory=/home/ubuntu/api_wisper_v1
+ExecStartPre=/usr/bin/docker-compose down
+ExecStart=/usr/bin/docker-compose up
+ExecStop=/usr/bin/docker-compose down
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=api-wisper
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+#### 2. サービスの有効化と起動
+```bash
+# 既存のDockerコンテナを停止
+cd ~/api_wisper_v1
+sudo docker-compose down
+
+# systemdをリロード
+sudo systemctl daemon-reload
+
+# サービスを有効化（自動起動ON）
+sudo systemctl enable api-wisper.service
+
+# サービスを起動
+sudo systemctl start api-wisper.service
+
+# 状態確認
+sudo systemctl status api-wisper.service
+```
+
+### サービス管理コマンド
+
+```bash
+# サービスの状態確認
+sudo systemctl status api-wisper
+
+# サービスの停止
+sudo systemctl stop api-wisper
+
+# サービスの開始
+sudo systemctl start api-wisper
+
+# サービスの再起動
+sudo systemctl restart api-wisper
+
+# リアルタイムログ表示
+sudo journalctl -u api-wisper -f
+
+# 過去のログ表示
+sudo journalctl -u api-wisper --since "1 hour ago"
+```
+
+### Docker操作（手動管理時）
+
+```bash
+# コンテナの状態確認
+sudo docker ps
+
+# コンテナの停止
+cd ~/api_wisper_v1
+sudo docker-compose down
+
+# コンテナの起動
+sudo docker-compose up -d
+
+# ログの確認
+sudo docker-compose logs -f
+
+# コンテナ内に入る
+sudo docker exec -it api_wisper_v1 bash
+```
+
+### トラブルシューティング
+
+#### メモリ不足エラー
+```bash
+# エラー: "Killed" または OOMエラー
+# 解決策:
+1. スワップメモリを追加（上記参照）
+2. より小さいWhisperモデルを使用（base/small）
+3. docker-compose.ymlのmem_limitを調整
+```
+
+#### ポート競合
+```bash
+# エラー: "bind: address already in use"
+# 解決策:
+sudo lsof -i :8001
+sudo kill -9 <PID>
+```
+
+#### Whisperモデルのキャッシュクリア
+```bash
+# Dockerボリュームを削除してキャッシュをクリア
+sudo docker volume rm api_wisper_v1_whisper_cache
+```
+
+### API動作確認
+
+```bash
+# ヘルスチェック
+curl http://your-ec2-ip:8001/docs
+
+# APIテスト
+curl -X POST "http://your-ec2-ip:8001/fetch-and-transcribe" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "device_id": "your-device-id",
+    "date": "2025-07-13",
+    "model": "base"
+  }'
+```
+
+### セキュリティグループ設定
+
+EC2のセキュリティグループで以下のポートを開放：
+- インバウンドルール: ポート8001 (TCP) - APIアクセス用
+
+### 本番環境での推奨事項
+
+1. **HTTPS化**: リバースプロキシ（Nginx）を使用してSSL証明書を設定
+2. **認証**: APIキー認証やOAuth2の実装
+3. **モニタリング**: CloudWatchやPrometheusでの監視
+4. **バックアップ**: 定期的な設定ファイルのバックアップ
+5. **ログ管理**: ログファイルのローテーションと保存
+
+---
