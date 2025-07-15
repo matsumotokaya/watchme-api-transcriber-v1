@@ -6,7 +6,7 @@
 ## 前提条件
 - Docker 20.10以上
 - Docker Compose v3.8以上
-- EC2インスタンス（推奨: t3.large以上、8GB RAM）
+- EC2インスタンス（t4g.small、2GB RAM）
 - 10GB以上の空きディスク容量
 
 ## デプロイ手順
@@ -66,7 +66,7 @@ curl -X POST "http://localhost:8001/fetch-and-transcribe" \
   -d '{
     "device_id": "your-device-id",
     "date": "2025-07-13",
-    "model": "medium"
+    "model": "base"
   }'
 ```
 
@@ -74,12 +74,12 @@ curl -X POST "http://localhost:8001/fetch-and-transcribe" \
 
 ### Dockerfileの特徴
 - Python 3.12を使用（開発環境と同じバージョン）
-- Whisper mediumモデルを事前ダウンロード（起動時間短縮）
+- Whisper baseモデルを使用（サーバーリソース制約）
 - 非rootユーザーで実行（セキュリティ向上）
 - ヘルスチェック機能付き
 
 ### docker-compose.ymlの特徴
-- メモリ制限: 8GB
+- メモリ制限: 2GB
 - CPU制限: 2コア
 - Whisperモデルキャッシュの永続化
 - ログローテーション設定
@@ -145,6 +145,6 @@ ports:
 4. Supabaseのキーは定期的にローテーション
 
 ## パフォーマンス最適化
-1. Whisper largeモデルは必要時のみ使用
+1. 現在はbaseモデルのみを使用
 2. 定期的なDockerイメージの最適化
 3. ログファイルの定期的なクリーンアップ

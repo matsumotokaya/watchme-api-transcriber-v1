@@ -12,6 +12,11 @@ import aiohttp
 import asyncio
 from supabase import create_client, Client
 from dotenv import load_dotenv
+import logging
+
+# ロギング設定
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # 環境変数を読み込み
 load_dotenv()
@@ -39,154 +44,143 @@ app.add_middleware(
 # Whisperモデルをグローバルで管理
 print("Whisperモデルを読み込み中...")
 models = {}
-# 標準モデル（medium）を初期ロード
-models["medium"] = whisper.load_model("medium")
-print("Whisper mediumモデル読み込み完了（標準）")
+# ⚠️ 警告: baseモデル以外を使用すると、EC2（t4g.small）のメモリ上限を超えてクラッシュします！
+# モデル変更時は必ずEC2インスタンスのスケールアップとセットで実施してください
+# - small以上: t3.medium（4GB RAM）以上が必要
+# - medium以上: t3.large（8GB RAM）以上が必要
+# - large: t3.xlarge（16GB RAM）以上が必要
+models["base"] = whisper.load_model("base")
+print("Whisper baseモデル読み込み完了（サーバーリソース制約により固定）")
 
 # リクエストボディのモデル
 class FetchAndTranscribeRequest(BaseModel):
     device_id: str
     date: str
-    model: str = "medium"  # デフォルトはmedium、large指定可能
-
-# モデル取得関数
-def get_whisper_model(model_name: str = "medium"):
-    """
-    指定されたWhisperモデルを取得、未ロードの場合は動的ロード
-    """
-    if model_name not in ["medium", "large"]:
-        raise HTTPException(status_code=400, detail=f"サポートされていないモデル: {model_name}. 対応モデル: medium, large")
-    
-    if model_name not in models:
-        print(f"Whisper {model_name}モデルを読み込み中...")
-        models[model_name] = whisper.load_model(model_name)
-        print(f"Whisper {model_name}モデル読み込み完了")
-    
-    return models[model_name]
-
+    model: str = "base"  # baseモデルのみサポート
 
 @app.post("/fetch-and-transcribe")
 async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
-    """
-    指定されたデバイス・日付の.wavファイルをAPIから取得し、一括文字起こしを行う
-    """
-    device_id = request.device_id
-    date = request.date
-    model_name = request.model
+    """WatchMeシステムのメイン処理エンドポイント"""
     
-    # 指定されたWhisperモデルを取得
-    whisper_model = get_whisper_model(model_name)
+    # サポートされているモデルの確認
+    if request.model not in ["base"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"サポートされていないモデル: {request.model}. 対応モデル: base. "
+                   f"⚠️ 警告: 他のモデルを使用するとメモリ不足でEC2がクラッシュします！"
+                   f"モデル変更にはEC2インスタンスのスケールアップが必要です。"
+        )
     
-    print(f"Supabaseへの直接保存モードで実行中")
+    # Whisperモデルを選択
+    whisper_model = models.get(request.model)
+    if not whisper_model:
+        raise HTTPException(
+            status_code=500,
+            detail=f"モデル {request.model} が読み込まれていません"
+        )
     
-    # 一時ディレクトリを作成
-    with tempfile.TemporaryDirectory() as temp_dir:
-        print(f"\n=== 一括取得・文字起こし開始 ===")
-        print(f"デバイスID: {device_id}")
-        print(f"対象日付: {date}")
-        print(f"Whisperモデル: {model_name}")
-        print(f"保存先: Supabase transcriptions テーブル")
-        print(f"=" * 50)
-        
-        fetched = []
-        processed = []
-        skipped = []
-        errors = []
-        saved_to_supabase = []
-        
-        # 時間ブロックのリスト（00-00から23-30まで）
-        # 重要: ほとんどの時間スロットではデータが存在しないのが正常
-        time_blocks = [f"{hour:02d}-{minute:02d}" for hour in range(24) for minute in [0, 30]]
-        
-        # SSL検証をスキップするコネクターを作成（音声ファイル取得用）
-        connector = aiohttp.TCPConnector(ssl=False)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            for time_block in time_blocks:
-                try:
-                    print(f"📝 処理開始: {time_block}")
-                    
-                    # 音声ファイルのURL（/downloadエンドポイントを使用）
-                    url = f"https://api.hey-watch.me/download?device_id={device_id}&date={date}&slot={time_block}"
-                    
-                    # 音声ファイルの取得
-                    async with session.get(url) as response:
-                        if response.status == 200:
-                            # 一時ファイルに保存
-                            temp_file = os.path.join(temp_dir, f"{time_block}.wav")
-                            with open(temp_file, 'wb') as f:
-                                f.write(await response.read())
-                            
-                            print(f"📥 取得: {time_block}.wav")
-                            fetched.append(f"{time_block}.wav")
-                            
+    # 時間スロットを生成（00-00から23-30まで）
+    time_blocks = []
+    for hour in range(24):
+        for minute in ["00", "30"]:
+            time_blocks.append(f"{hour:02d}-{minute}")
+    
+    # 処理結果を記録
+    fetched_files = []
+    processed_files = []
+    saved_to_supabase = []
+    skipped_files = []
+    errors = []
+    
+    # SSLを無効化してaiohttp接続を設定
+    connector = aiohttp.TCPConnector(ssl=False)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        for time_block in time_blocks:
+            try:
+                # Vault APIから音声ファイルを取得
+                url = f"https://api.hey-watch.me/download?device_id={request.device_id}&date={request.date}&slot={time_block}"
+                
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        # 音声データを一時ファイルに保存
+                        audio_data = await response.read()
+                        
+                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                            tmp_file.write(audio_data)
+                            tmp_file_path = tmp_file.name
+                        
+                        try:
                             # Whisperで文字起こし
-                            result = whisper_model.transcribe(temp_file)
-                            transcription = result["text"]
+                            result = whisper_model.transcribe(tmp_file_path, language="ja")
+                            transcription = result["text"].strip()
                             
-                            # Supabaseに直接保存
-                            try:
-                                supabase_data = {
-                                    "device_id": device_id,
-                                    "date": date,
+                            if transcription:
+                                # Supabaseに保存
+                                data = {
+                                    "device_id": request.device_id,
+                                    "date": request.date,
                                     "time_block": time_block,
                                     "transcription": transcription
                                 }
                                 
-                                supabase_result = supabase.table('vibe_whisper').insert(supabase_data).execute()
+                                # upsert（既存データは更新、新規データは挿入）
+                                response = supabase.table('vibe_whisper').upsert(data).execute()
                                 
-                                if supabase_result.data:
-                                    print(f"💾 Supabase保存完了: {time_block}")
-                                    print(f"📄 文字起こし結果: {len(transcription)} 文字")
-                                    saved_to_supabase.append(f"{time_block}")
-                                    processed.append(f"{time_block}")
-                                    print(f"✅ 完了: {time_block} ({len(transcription)} 文字)")
-                                else:
-                                    print(f"❌ Supabase保存失敗: {time_block}")
-                                    errors.append(f"{time_block}")
-                                    
-                            except Exception as supabase_error:
-                                print(f"❌ Supabase保存エラー: {time_block} - {str(supabase_error)}")
-                                errors.append(f"{time_block}")
-                            
-                        else:
-                            if response.status == 404:
-                                # 404は正常な動作: 測定されていない時間スロットでは音声データが存在しない
-                                print(f"⏭️ データなし: {time_block}.wav (測定されていません)")
-                                skipped.append(f"{time_block}.wav")
+                                fetched_files.append(f"{time_block}.wav")
+                                processed_files.append(time_block)
+                                saved_to_supabase.append(time_block)
+                                logger.info(f"✅ {time_block}: 文字起こし完了・Supabase保存済み")
                             else:
-                                print(f"❌ 取得失敗: {time_block}.wav (ステータス: {response.status})")
-                                errors.append(f"{time_block}.wav")
-                
-                except Exception as e:
-                    print(f"❌ エラー: {time_block} - {str(e)}")
-                    errors.append(f"{time_block}.wav")
-        
-        print(f"\n=== 一括取得・文字起こし・Supabase保存完了 ===")
-        print(f"📥 音声取得成功: {len(fetched)} ファイル")
-        print(f"📝 処理対象: {len(processed)} ファイル")
-        print(f"💾 Supabase保存成功: {len(saved_to_supabase)} ファイル")
-        print(f"⏭️ スキップ: {len([s for s in skipped if not s.endswith('.wav')])} ファイル (既存データ)")
-        print(f"📭 データなし: {len([s for s in skipped if s.endswith('.wav')])} ファイル (測定なし)")
-        print(f"❌ エラー: {len(errors)} ファイル")
-        print(f"=" * 50)
-        
-        return {
-            "status": "success",
-            "fetched": fetched,
-            "processed": processed,
-            "saved_to_supabase": saved_to_supabase,
-            "skipped": skipped,
-            "errors": errors,
-            "summary": {
-                "total_time_blocks": len(time_blocks),
-                "audio_fetched": len(fetched),
-                "supabase_saved": len(saved_to_supabase),
-                "skipped_existing": len(skipped),
-                "errors": len(errors)
-            }
+                                logger.info(f"⏭️ {time_block}: 無音または文字起こし結果なし")
+                                skipped_files.append(f"{time_block}.wav")
+                        
+                        finally:
+                            # 一時ファイルを削除
+                            if os.path.exists(tmp_file_path):
+                                os.unlink(tmp_file_path)
+                    
+                    elif response.status == 404:
+                        # ファイルが存在しない（測定されていない時間）
+                        logger.info(f"⏭️ {time_block}: データなし（404）")
+                        skipped_files.append(f"{time_block}.wav")
+                    else:
+                        error_msg = f"{time_block}: HTTPエラー {response.status}"
+                        logger.error(f"❌ {error_msg}")
+                        errors.append(error_msg)
+            
+            except Exception as e:
+                error_msg = f"{time_block}: エラー - {str(e)}"
+                logger.error(f"❌ {error_msg}")
+                errors.append(error_msg)
+    
+    # 処理結果を返す
+    return {
+        "status": "success",
+        "fetched": fetched_files,
+        "processed": processed_files,
+        "saved_to_supabase": saved_to_supabase,
+        "skipped": skipped_files,
+        "errors": errors,
+        "summary": {
+            "total_time_blocks": len(time_blocks),
+            "audio_fetched": len(fetched_files),
+            "supabase_saved": len(saved_to_supabase),
+            "skipped_existing": len(skipped_files),
+            "errors": len(errors)
         }
+    }
 
+@app.get("/")
+def read_root():
+    return {
+        "name": "Whisper API for WatchMe",
+        "version": "1.0.0",
+        "description": "音声文字起こしAPI - Supabase統合版",
+        "endpoints": {
+            "main": "/fetch-and-transcribe",
+            "docs": "/docs"
+        }
+    }
 
 if __name__ == "__main__":
-    # WatchMeプロジェクトのポート配置に合わせてポート8001を使用
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True) 
+    uvicorn.run(app, host="0.0.0.0", port=8001)
