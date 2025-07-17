@@ -2,6 +2,140 @@
 
 WatchMeエコシステム専用のWhisper音声文字起こしAPI。Vault APIからの音声取得とSupabaseへの直接保存により、音声データの取得から文字起こし、結果保存まで一貫した処理を提供します。
 
+## 🚀 2025年7月 性能改善アップデート
+
+### 改善内容
+- **重複処理の排除**: Supabaseで処理済みデータを事前チェックし、未処理分のみを処理
+- **無駄な処理の削減**: Vault APIで音声データの存在を事前確認し、データが存在するスロットのみ処理
+- **処理時間の大幅短縮**: 従来最大1時間以上 → 実データのみの処理時間に短縮
+- **詳細な処理レポート**: スキップ理由と処理結果を明確に表示
+
+### 📊 処理フロー詳細
+
+#### 1. リクエスト受信
+```json
+{
+  "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
+  "date": "2025-07-17",
+  "model": "base"
+}
+```
+
+#### 2. 処理の流れ
+
+```
+[開始] リクエスト受信
+   ↓
+[Step 1] Supabaseでの処理済みチェック
+   ├─ vibe_whisperテーブルから既存データを検索
+   ├─ 条件: device_id + date の組み合わせ
+   └─ 結果: 処理済みtime_blockのセットを取得
+   ↓
+[判定1] 全スロットが処理済み？
+   ├─ YES → 処理終了（全て処理済みのレスポンス）
+   └─ NO  → 次のステップへ
+   ↓
+[Step 2] Vault APIでの音声データ存在確認
+   ├─ 未処理スロットのみを対象に並列チェック
+   ├─ 各スロットに対してGETリクエスト（ステータスコードのみ確認）
+   └─ 結果: 音声データが存在するスロットのリストを取得
+   ↓
+[判定2] 音声データが存在する未処理スロットがある？
+   ├─ NO  → 処理終了（処理対象なしのレスポンス）
+   └─ YES → 次のステップへ
+   ↓
+[Step 3] 音声ダウンロードと文字起こし
+   ├─ 対象: 未処理 かつ 音声データ存在のスロットのみ
+   ├─ 処理内容:
+   │   1. Vault APIから音声ファイルをダウンロード
+   │   2. Whisperで文字起こし実行
+   │   3. 結果をSupabaseに保存（upsert）
+   └─ エラー時: エラーリストに追加して継続
+   ↓
+[終了] 処理結果レスポンス返却
+```
+
+### 🔧 実装の重要ポイント
+
+#### 1. check_existing_data_in_supabase関数
+```python
+async def check_existing_data_in_supabase(device_id: str, date: str) -> Set[str]:
+    """Supabaseで既に処理済みのtime_blockを確認"""
+    # vibe_whisperテーブルから該当するレコードを検索
+    # 返り値: 処理済みtime_blockのセット（例: {'10-00', '10-30', ...}）
+```
+
+#### 2. check_audio_exists_in_vault関数
+```python
+async def check_audio_exists_in_vault(session, device_id, date, time_blocks) -> Dict[str, bool]:
+    """Vault APIで音声データの存在を確認"""
+    # 並列処理で各スロットの存在を確認
+    # GETリクエストでステータスコード200なら存在
+    # 返り値: {time_block: exists} の辞書
+```
+
+#### 3. 処理対象の絞り込み
+```python
+# Step 1: DB確認
+existing_in_db = await check_existing_data_in_supabase(device_id, date)
+unprocessed_blocks = [tb for tb in all_time_blocks if tb not in existing_in_db]
+
+# Step 2: 音声存在確認
+audio_exists = await check_audio_exists_in_vault(session, device_id, date, unprocessed_blocks)
+blocks_to_process = [tb for tb in unprocessed_blocks if audio_exists.get(tb, False)]
+
+# Step 3: 実際の処理は blocks_to_process のみ
+```
+
+### 📈 パフォーマンス比較
+
+#### 改修前（全スロット処理）
+- 48スロット全てに対して音声ダウンロードを試行
+- 404エラーが大量発生（データがないスロット）
+- 処理時間: 最大1時間以上
+
+#### 改修後（効率的な処理）
+- 処理済みスロット: Supabaseチェックでスキップ
+- データなしスロット: Vault APIチェックでスキップ
+- 処理時間: 実データ分のみ（例: 1スロットなら約1-2分）
+
+### 💡 実際の処理例
+
+#### ケース1: 初回処理（1スロットのみデータあり）
+```
+リクエスト: device_id="xxx", date="2025-07-17"
+処理結果:
+- Supabaseチェック: 0件の処理済み → 全48スロットが未処理
+- Vault APIチェック: 1/48件の音声データ存在（10-00のみ）
+- 文字起こし実行: 10-00.wavのみ処理
+- 実行時間: 75.3秒（従来なら1時間以上）
+```
+
+#### ケース2: 再実行（全て処理済み）
+```
+リクエスト: 同じdevice_id, date
+処理結果:
+- Supabaseチェック: 1件の処理済み（10-00）
+- 残り47スロットをVault APIチェック: 0件の音声データ
+- 処理スキップ: 全てスキップ
+- 実行時間: 1.2秒（高速終了）
+```
+
+### 🔄 今後の改善ポイント
+
+1. **並列処理の最適化**
+   - 現在: Vault APIチェックは並列、文字起こしは逐次
+   - 改善案: 文字起こしも並列化（メモリ使用量に注意）
+
+2. **キャッシング**
+   - 改善案: 最近チェックしたスロットの存在情報をキャッシュ
+
+3. **バッチ処理API**
+   - 改善案: Vault APIにバッチでの存在確認エンドポイント追加
+
+4. **プログレス通知**
+   - 改善案: WebSocketやSSEで処理進捗をリアルタイム通知
+
 ## 🔑 重要な特徴
 
 ### ✨ 単一エンドポイント設計
@@ -141,31 +275,31 @@ WatchMeシステムのメイン処理エンドポイント。指定デバイス�
   - **本番環境では "base" モデルのみ利用可能**（サーバーリソース制約）
   - 将来的なアップグレード時に他のモデルも検討可能
 
-#### 処理フロー
-1. **モデル選択**: Whisper baseモデルを使用（サーバーリソース制約）
-2. **音声取得**: Vault APIから48個の時間スロット(00-00.wav～23-30.wav)を取得
-   - **重要**: 404エラーは正常な動作です（測定されていない時間スロット）
-   - 存在するデータのみを処理し、存在しないデータは自動的にスキップされます
-3. **文字起こし**: 選択されたWhisperモデルで文字起こし実行
-4. **Supabase保存**: 処理結果をSupabaseのvibe_whisperテーブルに直接保存
-5. **結果報告**: 処理結果の詳細を返却
+#### 処理フロー（性能改善版）
+1. **事前チェック（新機能）**: 
+   - Supabaseで処理済みデータを確認
+   - Vault APIで音声データの存在を確認
+2. **効率的な処理**: 
+   - 未処理かつデータ存在のスロットのみ処理
+   - Whisper baseモデルで文字起こし実行
+3. **結果保存**: Supabaseのvibe_whisperテーブルに保存
+4. **詳細レポート**: スキップ理由を含む処理結果を返却
 
-#### レスポンス例
+#### レスポンス例（性能改善版）
 ```json
 {
   "status": "success",
-  "fetched": ["18-00.wav", "18-30.wav"],
-  "processed": ["18-00", "18-30"],
-  "saved_to_supabase": ["18-00", "18-30"],
-  "skipped": ["00-00.wav", "00-30.wav", "01-00.wav", "..."],
-  "errors": [],
+  "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
+  "date": "2025-07-16",
   "summary": {
-    "total_time_blocks": 48,
-    "audio_fetched": 2,
-    "supabase_saved": 2,
-    "skipped_existing": 46,
+    "total_slots": 48,
+    "skipped_as_processed_in_db": 40,
+    "skipped_as_no_audio_in_vault": 5,
+    "successfully_transcribed": 3,
     "errors": 0
-  }
+  },
+  "processed_blocks": ["14-00", "15-30", "18-00"],
+  "execution_time_seconds": 180.5
 }
 ```
 
