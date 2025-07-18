@@ -84,11 +84,16 @@ async def get_audio_files_from_supabase(device_id: str, date: str, status_filter
     """Supabaseのaudio_filesテーブルから該当日の音声ファイル情報を取得"""
     try:
         # recorded_atの日付部分でフィルタリング
+        # 翌日の00:00:00未満として、23:59:59.999...も含めるように修正
+        from datetime import datetime, timedelta
+        start_date = datetime.strptime(date, "%Y-%m-%d")
+        end_date = start_date + timedelta(days=1)
+        
         query = supabase.table('audio_files') \
             .select('*') \
             .eq('device_id', device_id) \
-            .gte('recorded_at', f"{date}T00:00:00") \
-            .lt('recorded_at', f"{date}T23:59:59")
+            .gte('recorded_at', f"{start_date.strftime('%Y-%m-%d')}T00:00:00") \
+            .lt('recorded_at', f"{end_date.strftime('%Y-%m-%d')}T00:00:00")
         
         # ステータスフィルタが指定されている場合は適用
         if status_filter:
