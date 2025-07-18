@@ -78,46 +78,44 @@ class FetchAndTranscribeRequest(BaseModel):
     device_id: str
     date: str
     model: str = "base"  # baseモデルのみサポート
+    file_paths: List[str] = None  # オプション: 処理対象のfile_pathリスト
 
-async def check_existing_data_in_supabase(device_id: str, date: str) -> Set[str]:
-    """Supabaseで既に処理済みのtime_blockを確認"""
+async def get_audio_files_from_supabase(device_id: str, date: str, status_filter: str = 'pending') -> List[Dict]:
+    """Supabaseのaudio_filesテーブルから該当日の音声ファイル情報を取得"""
     try:
-        response = supabase.table('vibe_whisper').select('time_block').eq('device_id', device_id).eq('date', date).execute()
-        existing_time_blocks = {item['time_block'] for item in response.data}
-        logger.info(f"Supabaseチェック完了: {len(existing_time_blocks)}件の処理済みデータを発見")
-        return existing_time_blocks
-    except Exception as e:
-        logger.error(f"Supabaseチェックエラー: {str(e)}")
-        return set()
-
-def check_audio_exists_in_s3(device_id: str, date: str, time_blocks: List[str]) -> Dict[str, bool]:
-    """S3で音声データの存在を確認"""
-    audio_exists = {}
-    
-    for time_block in time_blocks:
-        # 新しいS3パス形式: files/{device_id}/{date}/{time_slot}/audio.wav
-        s3_key = f"files/{device_id}/{date}/{time_block}/audio.wav"
+        # recorded_atの日付部分でフィルタリング
+        query = supabase.table('audio_files') \
+            .select('*') \
+            .eq('device_id', device_id) \
+            .gte('recorded_at', f"{date}T00:00:00") \
+            .lt('recorded_at', f"{date}T23:59:59")
         
-        try:
-            # S3オブジェクトのメタデータを取得して存在確認
-            s3_client.head_object(Bucket=s3_bucket_name, Key=s3_key)
-            audio_exists[time_block] = True
-        except ClientError as e:
-            # 404エラーの場合はファイルが存在しない
-            if e.response['Error']['Code'] == '404':
-                audio_exists[time_block] = False
-            else:
-                logger.error(f"S3確認エラー ({time_block}): {str(e)}")
-                audio_exists[time_block] = False
-    
-    existing_count = sum(1 for exists in audio_exists.values() if exists)
-    logger.info(f"S3チェック完了: {existing_count}/{len(time_blocks)}件の音声データが存在")
-    
-    return audio_exists
+        # ステータスフィルタが指定されている場合は適用
+        if status_filter:
+            query = query.eq('transcriptions_status', status_filter)
+            
+        response = query.execute()
+        
+        if status_filter:
+            logger.info(f"audio_filesテーブルから{len(response.data)}件の{status_filter}ステータスの音声ファイルを発見")
+        else:
+            logger.info(f"audio_filesテーブルから{len(response.data)}件の音声ファイルを発見")
+        return response.data
+    except Exception as e:
+        logger.error(f"audio_filesテーブルの取得エラー: {str(e)}")
+        return []
+
+def extract_time_block_from_path(file_path: str) -> str:
+    """file_pathからtime_blockを抽出"""
+    # 例: files/device_id/2025-07-18/21-00/audio.wav → 21-00
+    parts = file_path.split('/')
+    if len(parts) >= 4:
+        return parts[-2]  # time_block部分を取得
+    return None
 
 @app.post("/fetch-and-transcribe")
 async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
-    """WatchMeシステムのメイン処理エンドポイント（性能改善版）"""
+    """WatchMeシステムのメイン処理エンドポイント（audio_filesテーブル経由版）"""
     start_time = time.time()
     
     # サポートされているモデルの確認
@@ -137,84 +135,63 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
             detail=f"モデル {request.model} が読み込まれていません"
         )
     
-    # 時間スロットを生成（00-00から23-30まで）
-    all_time_blocks = []
-    for hour in range(24):
-        for minute in ["00", "30"]:
-            all_time_blocks.append(f"{hour:02d}-{minute}")
+    # audio_filesテーブルから未処理（pending）の音声ファイルを取得
+    pending_files = await get_audio_files_from_supabase(request.device_id, request.date, 'pending')
     
-    # Step 1: Supabaseで処理済みデータをチェック
-    existing_in_db = await check_existing_data_in_supabase(request.device_id, request.date)
+    # 全ての音声ファイルを取得（統計情報用）
+    all_files = await get_audio_files_from_supabase(request.device_id, request.date, None)
     
-    # 未処理のスロットを特定
-    unprocessed_blocks = [tb for tb in all_time_blocks if tb not in existing_in_db]
+    # completedステータスのファイル数を計算
+    completed_count = len([f for f in all_files if f['transcriptions_status'] == 'completed'])
     
-    if not unprocessed_blocks:
+    if not pending_files:
         execution_time = time.time() - start_time
         return {
             "status": "success",
             "device_id": request.device_id,
             "date": request.date,
             "summary": {
-                "total_slots": len(all_time_blocks),
-                "skipped_as_processed_in_db": len(existing_in_db),
-                "skipped_as_no_audio_in_vault": 0,
-                "successfully_transcribed": 0,
+                "total_files": len(all_files),
+                "already_completed": completed_count,
+                "pending_processed": 0,
                 "errors": 0
             },
-            "processed_blocks": [],
+            "processed_files": [],
             "execution_time_seconds": round(execution_time, 1),
-            "message": "全てのスロットが既に処理済みです"
+            "message": f"処理対象となる音声ファイルがありません（全{len(all_files)}件中{completed_count}件が処理済み）"
         }
     
-    # Step 2: S3で音声データの存在を確認
-    audio_exists = check_audio_exists_in_s3(request.device_id, request.date, unprocessed_blocks)
+    # pendingステータスのファイルをすべて処理対象とする
+    files_to_process = pending_files
     
-    # 音声データが存在するスロットのみを処理対象とする
-    blocks_to_process = [tb for tb in unprocessed_blocks if audio_exists.get(tb, False)]
-    blocks_no_audio = [tb for tb in unprocessed_blocks if not audio_exists.get(tb, False)]
-    
-    if not blocks_to_process:
-        execution_time = time.time() - start_time
-        return {
-            "status": "success",
-            "device_id": request.device_id,
-            "date": request.date,
-            "summary": {
-                "total_slots": len(all_time_blocks),
-                "skipped_as_processed_in_db": len(existing_in_db),
-                "skipped_as_no_audio_in_vault": len(blocks_no_audio),
-                "successfully_transcribed": 0,
-                "errors": 0
-            },
-            "processed_blocks": [],
-            "execution_time_seconds": round(execution_time, 1),
-            "message": "処理対象となる新規音声データがありません"
-        }
-    
-    # Step 3: 実際の音声ダウンロードと文字起こし処理
+    # 実際の音声ダウンロードと文字起こし処理
     # 処理結果を記録
     successfully_transcribed = []
-    error_blocks = []
+    error_files = []
     
-    for time_block in blocks_to_process:
+    for audio_file in files_to_process:
         try:
-            # S3から音声ファイルを取得
-            s3_key = f"files/{request.device_id}/{request.date}/{time_block}/audio.wav"
+            file_path = audio_file['file_path']
+            time_block = extract_time_block_from_path(file_path)
+            
+            if not time_block:
+                logger.error(f"time_blockの抽出に失敗: {file_path}")
+                error_files.append(audio_file)
+                continue
             
             # 一時ファイルに音声データをダウンロード
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
                 tmp_file_path = tmp_file.name
                 
                 try:
-                    # S3からファイルをダウンロード
-                    s3_client.download_file(s3_bucket_name, s3_key, tmp_file_path)
+                    # S3からファイルをダウンロード（file_pathをそのまま使用）
+                    s3_client.download_file(s3_bucket_name, file_path, tmp_file_path)
                     
                     # Whisperで文字起こし
                     result = whisper_model.transcribe(tmp_file_path, language="ja")
                     transcription = result["text"].strip()
                     
-                    # Supabaseに保存（空の文字起こし結果も保存）
+                    # vibe_whisperテーブルに保存（空の文字起こし結果も保存）
                     data = {
                         "device_id": request.device_id,
                         "date": request.date,
@@ -225,8 +202,19 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
                     # upsert（既存データは更新、新規データは挿入）
                     response = supabase.table('vibe_whisper').upsert(data).execute()
                     
-                    successfully_transcribed.append(time_block)
-                    logger.info(f"✅ {time_block}: 文字起こし完了・Supabase保存済み")
+                    # audio_filesテーブルのtranscriptions_statusをcompletedに更新
+                    update_response = supabase.table('audio_files') \
+                        .update({'transcriptions_status': 'completed'}) \
+                        .eq('device_id', audio_file['device_id']) \
+                        .eq('recorded_at', audio_file['recorded_at']) \
+                        .execute()
+                    
+                    successfully_transcribed.append({
+                        'file_path': file_path,
+                        'time_block': time_block,
+                        'recorded_at': audio_file['recorded_at']
+                    })
+                    logger.info(f"✅ {file_path}: 文字起こし完了・Supabase保存済み・ステータス更新済み")
                 
                 finally:
                     # 一時ファイルを削除
@@ -234,13 +222,13 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
                         os.unlink(tmp_file_path)
         
         except ClientError as e:
-            error_msg = f"{time_block}: S3エラー - {str(e)}"
+            error_msg = f"{audio_file['file_path']}: S3エラー - {str(e)}"
             logger.error(f"❌ {error_msg}")
-            error_blocks.append(time_block)
+            error_files.append(audio_file)
         
         except Exception as e:
-            logger.error(f"❌ {time_block}: エラー - {str(e)}")
-            error_blocks.append(time_block)
+            logger.error(f"❌ {audio_file['file_path']}: エラー - {str(e)}")
+            error_files.append(audio_file)
     
     # 処理結果を返す
     execution_time = time.time() - start_time
@@ -250,15 +238,16 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
         "device_id": request.device_id,
         "date": request.date,
         "summary": {
-            "total_slots": len(all_time_blocks),
-            "skipped_as_processed_in_db": len(existing_in_db),
-            "skipped_as_no_audio_in_vault": len(blocks_no_audio),
-            "successfully_transcribed": len(successfully_transcribed),
-            "errors": len(error_blocks)
+            "total_files": len(all_files),
+            "already_completed": completed_count,
+            "pending_processed": len(successfully_transcribed),
+            "errors": len(error_files)
         },
-        "processed_blocks": successfully_transcribed,
-        "error_blocks": error_blocks if error_blocks else None,
-        "execution_time_seconds": round(execution_time, 1)
+        "processed_files": [f['file_path'] for f in successfully_transcribed],
+        "processed_time_blocks": [f['time_block'] for f in successfully_transcribed],
+        "error_files": [f['file_path'] for f in error_files] if error_files else None,
+        "execution_time_seconds": round(execution_time, 1),
+        "message": f"pendingステータスの{len(pending_files)}件中{len(successfully_transcribed)}件を正常に処理しました"
     }
 
 @app.get("/")

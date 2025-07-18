@@ -1,13 +1,51 @@
 # Whisper API for WatchMe - Supabase/S3統合版
 
-WatchMeエコシステム専用のWhisper音声文字起こしAPI。S3からの音声取得とSupabaseへの直接保存により、音声データの取得から文字起こし、結果保存まで一貫した処理を提供します。
+WatchMeエコシステム専用のWhisper音声文字起こしAPI。Supabaseのaudio_filesテーブルを参照し、S3から音声を取得して文字起こしを実行します。
 
-## 🔄 2025年7月 S3移行アップデート
+## ⚠️ 重要: 開発環境と本番環境の違い
 
-### 変更内容
-- **Vault APIからS3への移行**: 音声ファイルの取得をVault API経由からS3直接アクセスに変更
-- **新しいパス構造**: `files/{device_id}/{date}/{time_slot}/audio.wav` 形式に対応
-- **パフォーマンス向上**: S3からの高速ダウンロードにより処理速度が向上
+| 項目 | 開発環境（ローカル） | 本番環境（EC2） |
+|-----|---------------------|----------------|
+| **URL** | `http://localhost:8001` | `https://api.hey-watch.me/vibe-transcriber/` |
+| **起動方法** | `python3.12 main.py` | Docker + systemd |
+| **デプロイ先** | ローカルマシン | AWS EC2インスタンス |
+| **アクセス** | ローカルのみ | インターネット経由 |
+
+## 🔄 2025年7月 音声処理フロー改善アップデート
+
+### 最新の変更内容（2025年7月19日）
+- **audio_filesテーブル経由の処理**: Supabaseのaudio_filesテーブルを参照して音声ファイルを取得
+- **transcriptions_statusの活用**: 処理済みファイルをcompletedステータスで管理
+- **シンプルな判定ロジック**: transcriptions_statusのみで処理対象を判定（pendingのみ処理）
+- **S3パス取得**: audio_filesテーブルのfile_pathカラムからS3パスを取得
+- **スケジューラー改善**: 管理画面のスケジューラーログを詳細化し、処理対象日付を明確化
+
+### 🔧 管理画面スケジューラー改善詳細
+**問題**: スケジューラーログに処理対象日付の詳細情報が不足
+
+**修正内容**:
+1. **詳細なログ出力**:
+   - 処理対象期間を明確に表示（例：`2025-07-18 00:00:00 〜 2025-07-19 00:00:00`）
+   - 検索条件の詳細表示（device_id、recorded_at範囲）
+   - 処理対象の日付リストを表示
+
+2. **カラム名の修正**:
+   - `whisper_status` → `transcriptions_status`に対応
+   - 新しいテーブル構造に合わせて更新
+
+3. **日付フィルタリング改善**:
+   - タイムゾーン処理を強化（`+00:00`と`Z`の両方に対応）
+   - 明確な範囲チェック（`yesterday <= recorded_at <= now`）
+
+**改善後のログ例**:
+```
+0:00:00 - 🚀 Whisper自動処理を開始
+0:00:00 - 📅 処理対象期間: 2025-07-18 00:00:00 〜 2025-07-19 00:00:00
+0:00:00 - ⏰ 現在時刻: 2025-07-19 00:00:00
+0:00:00 - 🔍 検索条件: device_id=d067d407..., recorded_at=2025-07-18 00:00〜2025-07-19 00:00
+0:00:01 - 📋 audio_filesテーブル確認: 6件の未処理ファイルを検出
+0:00:01 - 📆 処理対象の日付: 2025-07-18
+```
 
 ## 🚀 2025年7月 性能改善アップデート
 
@@ -17,13 +55,13 @@ WatchMeエコシステム専用のWhisper音声文字起こしAPI。S3からの�
 - **処理時間の大幅短縮**: 従来最大1時間以上 → 実データのみの処理時間に短縮
 - **詳細な処理レポート**: スキップ理由と処理結果を明確に表示
 
-### 📊 処理フロー詳細
+### 📊 処理フロー詳細（最新版）
 
 #### 1. リクエスト受信
 ```json
 {
   "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
-  "date": "2025-07-17",
+  "date": "2025-07-18",
   "model": "base"
 }
 ```
@@ -33,99 +71,89 @@ WatchMeエコシステム専用のWhisper音声文字起こしAPI。S3からの�
 ```
 [開始] リクエスト受信
    ↓
-[Step 1] Supabaseでの処理済みチェック
-   ├─ vibe_whisperテーブルから既存データを検索
-   ├─ 条件: device_id + date の組み合わせ
-   └─ 結果: 処理済みtime_blockのセットを取得
+[Step 1] audio_filesテーブルから音声ファイル情報を取得
+   ├─ 条件: device_id + date + transcriptions_status='pending'
+   ├─ 取得データ: file_path, recorded_at など
+   └─ 結果: 未処理音声ファイルのリスト
    ↓
-[判定1] 全スロットが処理済み？
-   ├─ YES → 処理終了（全て処理済みのレスポンス）
-   └─ NO  → 次のステップへ
-   ↓
-[Step 2] Vault APIでの音声データ存在確認
-   ├─ 未処理スロットのみを対象に並列チェック
-   ├─ 各スロットに対してGETリクエスト（ステータスコードのみ確認）
-   └─ 結果: 音声データが存在するスロットのリストを取得
-   ↓
-[判定2] 音声データが存在する未処理スロットがある？
-   ├─ NO  → 処理終了（処理対象なしのレスポンス）
+[判定] pendingファイルが存在する？
+   ├─ NO  → 処理終了（全て処理済みのレスポンス）
    └─ YES → 次のステップへ
    ↓
-[Step 3] 音声ダウンロードと文字起こし
-   ├─ 対象: 未処理 かつ 音声データ存在のスロットのみ
+[Step 2] 音声ダウンロードと文字起こし
+   ├─ 対象: pendingステータスのファイルすべて
    ├─ 処理内容:
-   │   1. Vault APIから音声ファイルをダウンロード
+   │   1. file_pathを使用してS3から音声ファイルをダウンロード
    │   2. Whisperで文字起こし実行
-   │   3. 結果をSupabaseに保存（upsert）
+   │   3. 結果をvibe_whisperテーブルに保存（upsert）
+   │   4. audio_filesのtranscriptions_statusをcompletedに更新
    └─ エラー時: エラーリストに追加して継続
    ↓
 [終了] 処理結果レスポンス返却
 ```
 
-### 🔧 実装の重要ポイント
+### 🔧 実装の重要ポイント（最新版）
 
-#### 1. check_existing_data_in_supabase関数
+#### 1. get_audio_files_from_supabase関数
 ```python
-async def check_existing_data_in_supabase(device_id: str, date: str) -> Set[str]:
-    """Supabaseで既に処理済みのtime_blockを確認"""
-    # vibe_whisperテーブルから該当するレコードを検索
-    # 返り値: 処理済みtime_blockのセット（例: {'10-00', '10-30', ...}）
+async def get_audio_files_from_supabase(device_id: str, date: str, status_filter: str = 'pending') -> List[Dict]:
+    """Supabaseのaudio_filesテーブルから該当日の音声ファイル情報を取得"""
+    # audio_filesテーブルから指定条件でレコードを検索
+    # recorded_atの日付部分とtranscriptions_statusでフィルタリング
+    # 返り値: 音声ファイル情報のリスト
 ```
 
-#### 2. check_audio_exists_in_vault関数
+#### 2. 処理対象の判定（シンプル化）
 ```python
-async def check_audio_exists_in_vault(session, device_id, date, time_blocks) -> Dict[str, bool]:
-    """Vault APIで音声データの存在を確認"""
-    # 並列処理で各スロットの存在を確認
-    # GETリクエストでステータスコード200なら存在
-    # 返り値: {time_block: exists} の辞書
+# pendingステータスのファイルのみ取得
+pending_files = await get_audio_files_from_supabase(device_id, date, 'pending')
+
+# pendingファイルをすべて処理対象とする（既存データがあっても上書き）
+files_to_process = pending_files
 ```
 
-#### 3. 処理対象の絞り込み
+#### 3. ステータス更新
 ```python
-# Step 1: DB確認
-existing_in_db = await check_existing_data_in_supabase(device_id, date)
-unprocessed_blocks = [tb for tb in all_time_blocks if tb not in existing_in_db]
-
-# Step 2: 音声存在確認
-audio_exists = await check_audio_exists_in_vault(session, device_id, date, unprocessed_blocks)
-blocks_to_process = [tb for tb in unprocessed_blocks if audio_exists.get(tb, False)]
-
-# Step 3: 実際の処理は blocks_to_process のみ
+# 処理完了後、audio_filesテーブルのステータスを更新
+supabase.table('audio_files') \
+    .update({'transcriptions_status': 'completed'}) \
+    .eq('device_id', audio_file['device_id']) \
+    .eq('recorded_at', audio_file['recorded_at']) \
+    .execute()
 ```
 
 ### 📈 パフォーマンス比較
 
-#### 改修前（全スロット処理）
-- 48スロット全てに対して音声ダウンロードを試行
-- 404エラーが大量発生（データがないスロット）
-- 処理時間: 最大1時間以上
+#### 改修前（直接S3スキャン方式）
+- 48スロット全てをチェック（データの有無に関わらず）
+- vibe_whisperテーブルとS3の両方を確認する複雑なロジック
+- 処理判定が不明確（既存データがあってもpendingなら再処理すべきか不明）
 
-#### 改修後（効率的な処理）
-- 処理済みスロット: Supabaseチェックでスキップ
-- データなしスロット: Vault APIチェックでスキップ
-- 処理時間: 実データ分のみ（例: 1スロットなら約1-2分）
+#### 改修後（audio_filesテーブル経由）
+- audio_filesテーブルのtranscriptions_statusのみで判定（シンプル）
+- pendingファイルのみを処理対象とする明確なロジック
+- 処理時間: 必要な分のみ（例: 4ファイルなら約10秒）
 
-### 💡 実際の処理例
+### 💡 実際の処理例（最新版）
 
-#### ケース1: 初回処理（1スロットのみデータあり）
+#### ケース1: 初回処理（pendingファイルがある場合）
 ```
-リクエスト: device_id="xxx", date="2025-07-17"
+リクエスト: device_id="xxx", date="2025-07-18"
 処理結果:
-- Supabaseチェック: 0件の処理済み → 全48スロットが未処理
-- Vault APIチェック: 1/48件の音声データ存在（10-00のみ）
-- 文字起こし実行: 10-00.wavのみ処理
-- 実行時間: 75.3秒（従来なら1時間以上）
+- audio_filesチェック: 6件のファイル（pending: 4件、completed: 2件）
+- 処理対象: pendingステータスの4件すべて
+- 文字起こし実行: 4件を処理し、transcriptions_statusをcompletedに更新
+- 実行時間: 11.3秒
 ```
 
-#### ケース2: 再実行（全て処理済み）
+#### ケース2: 再実行（全てcompleted済み）
 ```
 リクエスト: 同じdevice_id, date
 処理結果:
-- Supabaseチェック: 1件の処理済み（10-00）
-- 残り47スロットをVault APIチェック: 0件の音声データ
+- audio_filesチェック: 6件のファイル（全てcompleted）
+- 処理対象: 0件（pendingファイルなし）
 - 処理スキップ: 全てスキップ
-- 実行時間: 1.2秒（高速終了）
+- 実行時間: 0.5秒（高速終了）
 ```
 
 ### 🔄 今後の改善ポイント
@@ -227,17 +255,23 @@ pip3 install fastapi uvicorn openai-whisper aiohttp boto3 supabase python-dotenv
 
 ## 🎬 使用方法
 
-### サーバー起動
+### 🖥️ 開発環境（ローカル）での起動
 ```bash
-# 開発環境
+# Python 3.12を使用
 python3.12 main.py
 
-# 本番環境
-python3 main.py
+# APIにアクセス
+curl http://localhost:8001/
 ```
 
-**開発環境URL**: `http://localhost:8001`
-**本番環境URL**: `https://api.hey-watch.me/vibe-transcriber/`
+### 🌍 本番環境（EC2）での確認
+```bash
+# 本番環境のAPIステータス確認（インターネット経由）
+curl https://api.hey-watch.me/vibe-transcriber/
+
+# 注意: 本番環境はDockerとsystemdで管理されています
+# 直接Pythonで起動しないでください！
+```
 
 ### 初回起動について
 Whisperモデルの読み込み時間：
@@ -292,21 +326,26 @@ WatchMeシステムのメイン処理エンドポイント。指定デバイス�
 3. **結果保存**: Supabaseのvibe_whisperテーブルに保存
 4. **詳細レポート**: スキップ理由を含む処理結果を返却
 
-#### レスポンス例（性能改善版）
+#### レスポンス例（最新版）
 ```json
 {
   "status": "success",
   "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
-  "date": "2025-07-16",
+  "date": "2025-07-18",
   "summary": {
-    "total_slots": 48,
-    "skipped_as_processed_in_db": 40,
-    "skipped_as_no_audio_in_s3": 5,
-    "successfully_transcribed": 3,
+    "total_files": 6,
+    "already_completed": 2,
+    "pending_processed": 4,
     "errors": 0
   },
-  "processed_blocks": ["14-00", "15-30", "18-00"],
-  "execution_time_seconds": 180.5
+  "processed_files": [
+    "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-18/12-00/audio.wav",
+    "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-18/14-00/audio.wav"
+  ],
+  "processed_time_blocks": ["12-00", "14-00"],
+  "error_files": null,
+  "execution_time_seconds": 11.3,
+  "message": "pendingステータスの4件中4件を正常に処理しました"
 }
 ```
 
@@ -525,13 +564,12 @@ sudo kill -9 <PID>
 
 ## 🚀 本番環境デプロイ手順（EC2 + Docker + systemd）
 
-### 📝 本番環境でのAPI実行方法
+### ⚠️ 重要な前提
+- **本番環境はEC2インスタンス上で動作します**（ローカルではありません）
+- **URLは `https://api.hey-watch.me/vibe-transcriber/` です**（localhost:8001ではありません）
+- **Dockerとsystemdで管理されています**（直接Pythonで起動しません）
 
-**本番環境URL**: `https://api.hey-watch.me/vibe-transcriber/`
-
-このAPIは本番環境で上記のURLでアクセス可能です。Nginxでリバースプロキシ設定されており、外部から直接アクセスできます。
-
-### 🔧 本番環境デプロイ手順
+### 🔧 本番環境へのデプロイ手順
 
 #### 1. 本番環境（EC2）でのデプロイ
 ```bash
@@ -620,14 +658,19 @@ curl -X POST "https://api.hey-watch.me/vibe-transcriber/fetch-and-transcribe" \
 
 ---
 
+### 🚨 開発環境での作業について
+**開発環境（ローカル）でDockerコンテナを起動しても、それは本番環境にはなりません！**
+- ローカルでのDocker起動 → `http://localhost:8001` でアクセス可能（開発用）
+- 本番環境 → EC2インスタンス上で動作し、`https://api.hey-watch.me/vibe-transcriber/` でアクセス
+
 ### 前提条件
-- EC2インスタンス（Ubuntu 20.04/22.04）
-- t4g.small（現在使用中）
-- Docker/Docker Composeインストール済み
+- **本番EC2インスタンス**（Ubuntu 20.04/22.04）へのSSHアクセス権限
+- EC2インスタンスタイプ：t4g.small（現在使用中）
+- EC2上にDocker/Docker Composeがインストール済み
 
-### デプロイ手順
+### デプロイ手順（EC2へのデプロイ）
 
-#### 1. プロジェクトのアップロード
+#### 1. EC2インスタンスへ接続してプロジェクトをアップロード
 ```bash
 # ローカルでプロジェクトを圧縮
 tar -czf api_wisper_v1.tar.gz api_wisper_v1
