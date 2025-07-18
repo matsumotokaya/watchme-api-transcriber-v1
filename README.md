@@ -1,6 +1,13 @@
-# Whisper API for WatchMe - Supabase統合版
+# Whisper API for WatchMe - Supabase/S3統合版
 
-WatchMeエコシステム専用のWhisper音声文字起こしAPI。Vault APIからの音声取得とSupabaseへの直接保存により、音声データの取得から文字起こし、結果保存まで一貫した処理を提供します。
+WatchMeエコシステム専用のWhisper音声文字起こしAPI。S3からの音声取得とSupabaseへの直接保存により、音声データの取得から文字起こし、結果保存まで一貫した処理を提供します。
+
+## 🔄 2025年7月 S3移行アップデート
+
+### 変更内容
+- **Vault APIからS3への移行**: 音声ファイルの取得をVault API経由からS3直接アクセスに変更
+- **新しいパス構造**: `files/{device_id}/{date}/{time_slot}/audio.wav` 形式に対応
+- **パフォーマンス向上**: S3からの高速ダウンロードにより処理速度が向上
 
 ## 🚀 2025年7月 性能改善アップデート
 
@@ -131,7 +138,7 @@ blocks_to_process = [tb for tb in unprocessed_blocks if audio_exists.get(tb, Fal
    - 改善案: 最近チェックしたスロットの存在情報をキャッシュ
 
 3. **バッチ処理API**
-   - 改善案: Vault APIにバッチでの存在確認エンドポイント追加
+   - 改善案: S3オブジェクトのバッチ確認機能の利用
 
 4. **プログレス通知**
    - 改善案: WebSocketやSSEで処理進捗をリアルタイム通知
@@ -140,7 +147,7 @@ blocks_to_process = [tb for tb in unprocessed_blocks if audio_exists.get(tb, Fal
 
 ### ✨ 単一エンドポイント設計
 - **POST /fetch-and-transcribe** のみ提供
-- Vault APIからの音声取得 → 文字起こし → Supabaseへの直接保存を一つの処理で完結
+- S3からの音声取得 → 文字起こし → Supabaseへの直接保存を一つの処理で完結
 - シンプルで信頼性の高いワークフロー
 
 ### 🎯 高精度音声認識
@@ -149,7 +156,7 @@ blocks_to_process = [tb for tb in unprocessed_blocks if audio_exists.get(tb, Fal
 - 医療・心理分析用途に最適化
 
 ### 🏗️ WatchMeエコシステム統合
-- iOS app → Vault API → Whisper API → Supabase の完全な処理チェーン
+- iOS app → Vault API (S3保存) → Whisper API → Supabase の完全な処理チェーン
 - デバイスベースの識別システム (device_id)
 - 30分間隔の時間スロット処理 (48スロット/日)
 - Supabaseへの直接保存でリアルタイムデータアクセス
@@ -166,7 +173,7 @@ blocks_to_process = [tb for tb in unprocessed_blocks if audio_exists.get(tb, Fal
 - **インスタンス**: t4g.small (2vCPU, 2GB RAM)
 - **メモリ**: 最低4GB、推奨8GB以上
 - **ストレージ**: 10GB以上
-- **ネットワーク**: Vault API (api.hey-watch.me) への接続
+- **ネットワーク**: AWS S3 (watchme-vaultバケット) への接続
 
 ## 💾 容量要件詳細
 
@@ -203,7 +210,7 @@ rm ~/.cache/whisper/small.pt   # 使用しない場合
 ### macOS開発環境
 ```bash
 # システムPython環境にインストール
-python3.12 -m pip install fastapi uvicorn openai-whisper aiohttp
+python3.12 -m pip install fastapi uvicorn openai-whisper aiohttp boto3 supabase python-dotenv
 ```
 
 ### EC2本番環境
@@ -215,7 +222,7 @@ sudo apt update && sudo apt upgrade -y
 sudo apt install -y python3 python3-pip ffmpeg
 
 # Python依存関係
-pip3 install fastapi uvicorn openai-whisper aiohttp
+pip3 install fastapi uvicorn openai-whisper aiohttp boto3 supabase python-dotenv
 ```
 
 ## 🎬 使用方法
@@ -294,7 +301,7 @@ WatchMeシステムのメイン処理エンドポイント。指定デバイス�
   "summary": {
     "total_slots": 48,
     "skipped_as_processed_in_db": 40,
-    "skipped_as_no_audio_in_vault": 5,
+    "skipped_as_no_audio_in_s3": 5,
     "successfully_transcribed": 3,
     "errors": 0
   },
@@ -305,24 +312,25 @@ WatchMeシステムのメイン処理エンドポイント。指定デバイス�
 
 #### 使用例
 
-**標準モデル (medium) の使用:**
+**本番環境での使用:**
 ```bash
-curl -X POST "http://localhost:8001/fetch-and-transcribe" \
+curl -X POST "https://api.hey-watch.me/vibe-transcriber/fetch-and-transcribe" \
   -H "Content-Type: application/json" \
   -d '{
     "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
-    "date": "2025-07-05"
+    "date": "2025-07-05",
+    "model": "base"
   }'
 ```
 
-**高精度モデル (large) の使用:**
+**開発環境での使用:**
 ```bash
 curl -X POST "http://localhost:8001/fetch-and-transcribe" \
   -H "Content-Type: application/json" \
   -d '{
     "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
     "date": "2025-07-05",
-    "model": "large"
+    "model": "base"
   }'
 ```
 
@@ -367,14 +375,15 @@ CREATE TABLE vibe_whisper (
 > 4. その後でモデルを変更
 
 ### 対応モデル
-このAPIは2つのWhisperモデルをサポートしています：
+このAPIは本番環境でbaseモデルのみをサポートしています：
 
-#### **Base モデル (現在使用中)**
+#### **Base モデル (本番環境で使用中)**
 - **パラメータ数**: 74M (0.74億)
 - **精度**: 基本的な精度
 - **処理速度**: 高速
 - **メモリ使用量**: ~200MB (モデル) + ~500MB (処理)
 - **推奨用途**: リソース制約環境、基本的な文字起こし
+- **本番制約**: サーバーリソース制約により、本番環境では **baseモデルのみ** 利用可能
 
 ### モデル比較表と必要メモリ
 | モデル | パラメータ | 精度 | 速度 | 必要メモリ | 推奨EC2 | WatchMe対応 |
@@ -386,22 +395,29 @@ CREATE TABLE vibe_whisper (
 | large | 1550M | ⭐⭐⭐⭐⭐ | ⭐ | ~16GB | t3.xlarge | ⚠️ 要スケールアップ |
 
 ### モデル選択ガイド
-- **現在の設定**: `base` (サーバーリソース制約)
+- **本番環境**: `base` モデル固定（サーバーリソース制約）
+- **開発環境**: `base` モデル推奨（他のモデルはメモリ不足の可能性）
 - **将来のアップグレード**: インスタンスタイプ向上時に検討
 
 ## 🌐 本番運用 (EC2)
 
 ### ⚠️ 本番デプロイ前の必須修正
 
-現在のコードはmacOS開発環境用のため、EC2では以下の修正が必要です：
+環境変数の設定が必要です：
 
-```python
-# main.py の44行目を修正
-# 修正前（macOS用）
-output_dir = f"/Users/kaya.matsumoto/data/data_accounts/{device_id}/{date}/transcriptions"
+```bash
+# .envファイルを作成
+cat > .env << EOF
+# Supabase設定
+SUPABASE_URL=your_supabase_url
+SUPABASE_KEY=your_supabase_key
 
-# 修正後（EC2用）
-output_dir = f"/home/ubuntu/data/data_accounts/{device_id}/{date}/transcriptions"
+# AWS S3設定
+AWS_ACCESS_KEY_ID=your_access_key_id
+AWS_SECRET_ACCESS_KEY=your_secret_access_key
+S3_BUCKET_NAME=watchme-vault
+AWS_REGION=us-east-1
+EOF
 ```
 
 ### EC2インスタンス推奨
@@ -514,6 +530,53 @@ sudo kill -9 <PID>
 **本番環境URL**: `https://api.hey-watch.me/vibe-transcriber/`
 
 このAPIは本番環境で上記のURLでアクセス可能です。Nginxでリバースプロキシ設定されており、外部から直接アクセスできます。
+
+### 🔧 本番環境デプロイ手順
+
+#### 1. 本番環境（EC2）でのデプロイ
+```bash
+# 1. EC2インスタンスにSSH接続
+ssh -i your-key.pem ubuntu@your-ec2-ip
+
+# 2. プロジェクトディレクトリに移動
+cd /path/to/api_wisper_v1
+
+# 3. 最新のコードを取得（gitまたはファイル転送）
+git pull origin main
+# または
+scp -i your-key.pem -r local-api_wisper_v1/* ubuntu@your-ec2-ip:/path/to/api_wisper_v1/
+
+# 4. 環境変数を設定
+cp .env.example .env
+nano .env  # 本番環境の設定を入力
+
+# 5. Dockerイメージをビルド
+sudo docker-compose build
+
+# 6. 既存のコンテナを停止
+sudo docker-compose down
+
+# 7. 新しいコンテナを起動
+sudo docker-compose up -d
+
+# 8. 動作確認
+curl https://api.hey-watch.me/vibe-transcriber/
+```
+
+#### 2. systemdサービスでの自動起動設定（推奨）
+```bash
+# サービスを停止
+sudo systemctl stop api-wisper
+
+# 最新のコードでサービスを再起動
+sudo systemctl start api-wisper
+
+# 状態確認
+sudo systemctl status api-wisper
+
+# ログ確認
+sudo journalctl -u api-wisper -f
+```
 
 ### ⚠️ 本番環境での既知の問題とタイムアウトについて
 
@@ -741,11 +804,23 @@ sudo docker volume rm api_wisper_v1_whisper_cache
 ### API動作確認
 
 ```bash
-# ヘルスチェック
-curl http://your-ec2-ip:8001/docs
+# 本番環境ヘルスチェック
+curl https://api.hey-watch.me/vibe-transcriber/
 
-# APIテスト
-curl -X POST "http://your-ec2-ip:8001/fetch-and-transcribe" \
+# 本番環境APIテスト
+curl -X POST "https://api.hey-watch.me/vibe-transcriber/fetch-and-transcribe" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "device_id": "your-device-id",
+    "date": "2025-07-13",
+    "model": "base"
+  }'
+
+# 開発環境（ローカル）での確認
+curl http://localhost:8001/docs
+
+# 開発環境APIテスト
+curl -X POST "http://localhost:8001/fetch-and-transcribe" \
   -H "Content-Type: application/json" \
   -d '{
     "device_id": "your-device-id",

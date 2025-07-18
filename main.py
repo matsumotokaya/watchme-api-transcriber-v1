@@ -15,6 +15,8 @@ from dotenv import load_dotenv
 import logging
 import time
 from typing import List, Dict, Set
+import boto3
+from botocore.exceptions import ClientError
 
 # ロギング設定
 logging.basicConfig(level=logging.INFO)
@@ -34,6 +36,23 @@ if not supabase_url or not supabase_key:
 
 supabase: Client = create_client(supabase_url, supabase_key)
 print(f"Supabase接続設定完了: {supabase_url}")
+
+# AWS S3クライアントの初期化
+aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
+aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+s3_bucket_name = os.getenv('S3_BUCKET_NAME', 'watchme-vault')
+aws_region = os.getenv('AWS_REGION', 'us-east-1')
+
+if not aws_access_key_id or not aws_secret_access_key:
+    raise ValueError("AWS_ACCESS_KEY_IDおよびAWS_SECRET_ACCESS_KEYが設定されていません")
+
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=aws_access_key_id,
+    aws_secret_access_key=aws_secret_access_key,
+    region_name=aws_region
+)
+print(f"AWS S3接続設定完了: バケット={s3_bucket_name}, リージョン={aws_region}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,34 +90,28 @@ async def check_existing_data_in_supabase(device_id: str, date: str) -> Set[str]
         logger.error(f"Supabaseチェックエラー: {str(e)}")
         return set()
 
-async def check_audio_exists_in_vault(session: aiohttp.ClientSession, device_id: str, date: str, time_blocks: List[str]) -> Dict[str, bool]:
-    """Vault APIで音声データの存在を確認（GETリクエストでステータスコードのみ確認）"""
+def check_audio_exists_in_s3(device_id: str, date: str, time_blocks: List[str]) -> Dict[str, bool]:
+    """S3で音声データの存在を確認"""
     audio_exists = {}
     
-    # 並列でチェックするためのタスクを作成
-    async def check_single_slot(time_block: str) -> tuple:
-        url = f"https://api.hey-watch.me/download?device_id={device_id}&date={date}&slot={time_block}"
+    for time_block in time_blocks:
+        # 新しいS3パス形式: files/{device_id}/{date}/{time_slot}/audio.wav
+        s3_key = f"files/{device_id}/{date}/{time_block}/audio.wav"
+        
         try:
-            # GETリクエストでステータスコードのみ確認（データは読まない）
-            async with session.get(url) as response:
-                exists = response.status == 200
-                # データを読み込んで破棄（接続を正常に閉じるため）
-                if exists:
-                    await response.read()
-                return time_block, exists
-        except Exception as e:
-            logger.error(f"Vault API確認エラー ({time_block}): {str(e)}")
-            return time_block, False
-    
-    # 並列実行
-    tasks = [check_single_slot(tb) for tb in time_blocks]
-    results = await asyncio.gather(*tasks)
-    
-    for time_block, exists in results:
-        audio_exists[time_block] = exists
+            # S3オブジェクトのメタデータを取得して存在確認
+            s3_client.head_object(Bucket=s3_bucket_name, Key=s3_key)
+            audio_exists[time_block] = True
+        except ClientError as e:
+            # 404エラーの場合はファイルが存在しない
+            if e.response['Error']['Code'] == '404':
+                audio_exists[time_block] = False
+            else:
+                logger.error(f"S3確認エラー ({time_block}): {str(e)}")
+                audio_exists[time_block] = False
     
     existing_count = sum(1 for exists in audio_exists.values() if exists)
-    logger.info(f"Vault APIチェック完了: {existing_count}/{len(time_blocks)}件の音声データが存在")
+    logger.info(f"S3チェック完了: {existing_count}/{len(time_blocks)}件の音声データが存在")
     
     return audio_exists
 
@@ -154,10 +167,8 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
             "message": "全てのスロットが既に処理済みです"
         }
     
-    # Step 2: Vault APIで音声データの存在を確認
-    connector = aiohttp.TCPConnector(ssl=False)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        audio_exists = await check_audio_exists_in_vault(session, request.device_id, request.date, unprocessed_blocks)
+    # Step 2: S3で音声データの存在を確認
+    audio_exists = check_audio_exists_in_s3(request.device_id, request.date, unprocessed_blocks)
     
     # 音声データが存在するスロットのみを処理対象とする
     blocks_to_process = [tb for tb in unprocessed_blocks if audio_exists.get(tb, False)]
@@ -186,56 +197,50 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
     successfully_transcribed = []
     error_blocks = []
     
-    # SSLを無効化してaiohttp接続を設定
-    connector = aiohttp.TCPConnector(ssl=False)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        for time_block in blocks_to_process:
-            try:
-                # Vault APIから音声ファイルを取得
-                url = f"https://api.hey-watch.me/download?device_id={request.device_id}&date={request.date}&slot={time_block}"
-                
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        # 音声データを一時ファイルに保存
-                        audio_data = await response.read()
-                        
-                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
-                            tmp_file.write(audio_data)
-                            tmp_file_path = tmp_file.name
-                        
-                        try:
-                            # Whisperで文字起こし
-                            result = whisper_model.transcribe(tmp_file_path, language="ja")
-                            transcription = result["text"].strip()
-                            
-                            # Supabaseに保存（空の文字起こし結果も保存）
-                            data = {
-                                "device_id": request.device_id,
-                                "date": request.date,
-                                "time_block": time_block,
-                                "transcription": transcription if transcription else ""
-                            }
-                            
-                            # upsert（既存データは更新、新規データは挿入）
-                            response = supabase.table('vibe_whisper').upsert(data).execute()
-                            
-                            successfully_transcribed.append(time_block)
-                            logger.info(f"✅ {time_block}: 文字起こし完了・Supabase保存済み")
-                        
-                        finally:
-                            # 一時ファイルを削除
-                            if os.path.exists(tmp_file_path):
-                                os.unlink(tmp_file_path)
-                    
-                    else:
-                        # 想定外のエラー（音声存在チェックは通ったが取得失敗）
-                        error_msg = f"{time_block}: HTTPエラー {response.status}"
-                        logger.error(f"❌ {error_msg}")
-                        error_blocks.append(time_block)
+    for time_block in blocks_to_process:
+        try:
+            # S3から音声ファイルを取得
+            s3_key = f"files/{request.device_id}/{request.date}/{time_block}/audio.wav"
             
-            except Exception as e:
-                logger.error(f"❌ {time_block}: エラー - {str(e)}")
-                error_blocks.append(time_block)
+            # 一時ファイルに音声データをダウンロード
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                tmp_file_path = tmp_file.name
+                
+                try:
+                    # S3からファイルをダウンロード
+                    s3_client.download_file(s3_bucket_name, s3_key, tmp_file_path)
+                    
+                    # Whisperで文字起こし
+                    result = whisper_model.transcribe(tmp_file_path, language="ja")
+                    transcription = result["text"].strip()
+                    
+                    # Supabaseに保存（空の文字起こし結果も保存）
+                    data = {
+                        "device_id": request.device_id,
+                        "date": request.date,
+                        "time_block": time_block,
+                        "transcription": transcription if transcription else ""
+                    }
+                    
+                    # upsert（既存データは更新、新規データは挿入）
+                    response = supabase.table('vibe_whisper').upsert(data).execute()
+                    
+                    successfully_transcribed.append(time_block)
+                    logger.info(f"✅ {time_block}: 文字起こし完了・Supabase保存済み")
+                
+                finally:
+                    # 一時ファイルを削除
+                    if os.path.exists(tmp_file_path):
+                        os.unlink(tmp_file_path)
+        
+        except ClientError as e:
+            error_msg = f"{time_block}: S3エラー - {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            error_blocks.append(time_block)
+        
+        except Exception as e:
+            logger.error(f"❌ {time_block}: エラー - {str(e)}")
+            error_blocks.append(time_block)
     
     # 処理結果を返す
     execution_time = time.time() - start_time
