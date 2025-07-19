@@ -175,12 +175,11 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
             device_ids.add(device_id)
             dates.add(date_part)
             
-            # recorded_atを構築
-            recorded_at = f"{date_part}T{time_part.replace('-', ':')}:00+00:00"
             files_to_process.append({
                 'file_path': file_path,
                 'device_id': device_id,
-                'recorded_at': recorded_at
+                'date': date_part,
+                'time_block': time_part
             })
     
     # 実際の音声ダウンロードと文字起こし処理
@@ -198,6 +197,10 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
                 error_files.append(audio_file)
                 continue
             
+            # file_pathから日付を抽出
+            parts = file_path.split('/')
+            date_part = parts[2] if len(parts) >= 4 else None
+            
             # 一時ファイルに音声データをダウンロード
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
                 tmp_file_path = tmp_file.name
@@ -212,8 +215,8 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
                     
                     # vibe_whisperテーブルに保存（空の文字起こし結果も保存）
                     data = {
-                        "device_id": request.device_id,
-                        "date": request.date,
+                        "device_id": audio_file['device_id'],
+                        "date": date_part,  # file_pathから抽出した日付
                         "time_block": time_block,
                         "transcription": transcription if transcription else ""
                     }
@@ -222,18 +225,30 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
                     response = supabase.table('vibe_whisper').upsert(data).execute()
                     
                     # audio_filesテーブルのtranscriptions_statusをcompletedに更新
-                    update_response = supabase.table('audio_files') \
-                        .update({'transcriptions_status': 'completed'}) \
-                        .eq('device_id', audio_file['device_id']) \
-                        .eq('recorded_at', audio_file['recorded_at']) \
-                        .execute()
+                    # file_pathで直接更新する（シンプルで正確）
+                    try:
+                        update_response = supabase.table('audio_files') \
+                            .update({'transcriptions_status': 'completed'}) \
+                            .eq('file_path', file_path) \
+                            .execute()
+                        
+                        # 更新が成功したかチェック
+                        if update_response.data:
+                            logger.info(f"✅ audio_filesテーブルのステータス更新成功: {len(update_response.data)}件更新")
+                            logger.info(f"   file_path: {file_path}")
+                        else:
+                            logger.warning(f"⚠️ audio_filesテーブルのステータス更新: 対象レコードが見つかりません")
+                            logger.warning(f"   file_path: {file_path}")
+                            
+                    except Exception as update_error:
+                        logger.error(f"❌ audio_filesテーブルのステータス更新エラー: {str(update_error)}")
+                        logger.error(f"   file_path: {file_path}")
                     
                     successfully_transcribed.append({
                         'file_path': file_path,
-                        'time_block': time_block,
-                        'recorded_at': audio_file['recorded_at']
+                        'time_block': time_block
                     })
-                    logger.info(f"✅ {file_path}: 文字起こし完了・Supabase保存済み・ステータス更新済み")
+                    logger.info(f"✅ {file_path}: 文字起こし完了・Supabase保存済み")
                 
                 finally:
                     # 一時ファイルを削除
