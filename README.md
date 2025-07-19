@@ -2,6 +2,37 @@
 
 WatchMeエコシステム専用のWhisper音声文字起こしAPI。Supabaseのaudio_filesテーブルを参照し、S3から音声を取得して文字起こしを実行します。
 
+## 🔄 最新アップデート (2025-07-19)
+
+### ⚠️ 重要な仕様変更: APIインターフェースの簡素化
+
+#### 変更内容
+1. **リクエストパラメータの簡素化**
+   - **変更前**: `device_id`, `date`, `model`, `file_paths` が必要
+   - **変更後**: `file_paths`, `model` のみ必要
+   - `device_id`と`date`は`file_path`から自動的に抽出されるため不要に
+
+2. **処理フローの改善**
+   - APIは`file_paths`パラメータに含まれるファイルのみを処理
+   - データベースから独自にファイルを検索する処理を廃止
+   - 呼び出し元（管理画面）が処理対象を完全に制御
+
+3. **レスポンス形式の簡素化**
+   - 不要なフィールドを削除し、必要最小限の情報のみ返却
+
+#### 新しいリクエスト形式
+```json
+{
+  "file_paths": [
+    "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/14-30/audio.wav",
+    "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/15-00/audio.wav"
+  ],
+  "model": "base"
+}
+```
+
+この変更により、APIがよりシンプルで使いやすくなりました。
+
 ## ⚠️ 重要: 開発環境と本番環境の違い
 
 | 項目 | 開発環境（ローカル） | 本番環境（EC2） |
@@ -344,84 +375,80 @@ Whisperモデルの読み込み時間：
 
 ### POST /fetch-and-transcribe
 
-WatchMeシステムのメイン処理エンドポイント。指定デバイス・日付の音声データを一括処理します。
+WatchMeシステムのメイン処理エンドポイント。指定されたファイルパスの音声データを処理します。
 
 **本番環境での完全なURL**: `https://api.hey-watch.me/vibe-transcriber/fetch-and-transcribe`
 
-**⚠️ 重要な仕様**:
-- **404エラーは正常動作**: 測定されていない時間スロットでは404が返りますが、これはエラーではありません
-- **データなし = 正常**: ほとんどの時間スロットではデータが存在しないのが通常の状態です
-- **スキップ処理**: 存在しないデータは自動的にスキップされ、存在するデータのみが処理されます
-
-#### リクエスト
+#### リクエスト (2025-07-19 更新)
 ```json
 {
-  "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
-  "date": "2025-07-05",
+  "file_paths": [
+    "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/14-30/audio.wav",
+    "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/15-00/audio.wav"
+  ],
   "model": "base"
 }
 ```
 
 **パラメータ詳細:**
-- `device_id`: デバイス識別子 (必須)
-- `date`: 処理対象日付 YYYY-MM-DD形式 (必須)
+- `file_paths`: 処理対象の音声ファイルパスのリスト (必須)
+  - 各パスには device_id, date, time_block の情報が含まれる
+  - 空のリストも許可（処理対象なしとして正常終了）
 - `model`: Whisperモデル (オプション、デフォルト: "base")
   - **本番環境では "base" モデルのみ利用可能**（サーバーリソース制約）
-  - 将来的なアップグレード時に他のモデルも検討可能
 
-#### 処理フロー（性能改善版）
-1. **事前チェック（新機能）**: 
-   - Supabaseで処理済みデータを確認
-   - Vault APIで音声データの存在を確認
+#### 処理フロー（2025-07-19 更新）
+1. **file_pathsの受信**: 
+   - 呼び出し元から処理対象のfile_pathsリストを受信
 2. **効率的な処理**: 
-   - 未処理かつデータ存在のスロットのみ処理
+   - 指定されたファイルのみを処理
    - Whisper baseモデルで文字起こし実行
 3. **結果保存**: Supabaseのvibe_whisperテーブルに保存
-4. **詳細レポート**: スキップ理由を含む処理結果を返却
+4. **ステータス更新**: audio_filesテーブルのtranscriptions_statusを更新
 
-#### レスポンス例（最新版）
+#### レスポンス例（2025-07-19 更新）
 ```json
 {
   "status": "success",
-  "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
-  "date": "2025-07-18",
   "summary": {
-    "total_files": 6,
-    "already_completed": 2,
-    "pending_processed": 4,
+    "total_files": 2,
+    "pending_processed": 2,
     "errors": 0
   },
   "processed_files": [
-    "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-18/12-00/audio.wav",
-    "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-18/14-00/audio.wav"
+    "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/14-30/audio.wav",
+    "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/15-00/audio.wav"
   ],
-  "processed_time_blocks": ["12-00", "14-00"],
+  "processed_time_blocks": ["14-30", "15-00"],
   "error_files": null,
-  "execution_time_seconds": 11.3,
-  "message": "pendingステータスの4件中4件を正常に処理しました"
+  "execution_time_seconds": 4.2,
+  "message": "2件中2件を正常に処理しました"
 }
 ```
 
 #### 使用例
 
-**本番環境での使用:**
+**本番環境での使用 (2025-07-19 更新):**
 ```bash
 curl -X POST "https://api.hey-watch.me/vibe-transcriber/fetch-and-transcribe" \
   -H "Content-Type: application/json" \
   -d '{
-    "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
-    "date": "2025-07-05",
+    "file_paths": [
+      "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/14-30/audio.wav",
+      "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/15-00/audio.wav"
+    ],
     "model": "base"
   }'
 ```
 
-**開発環境での使用:**
+**開発環境での使用 (2025-07-19 更新):**
 ```bash
 curl -X POST "http://localhost:8001/fetch-and-transcribe" \
   -H "Content-Type: application/json" \
   -d '{
-    "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
-    "date": "2025-07-05",
+    "file_paths": [
+      "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/14-30/audio.wav"
+    ],
     "model": "base"
   }'
 ```

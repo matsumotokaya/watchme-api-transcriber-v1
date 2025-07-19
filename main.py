@@ -75,10 +75,8 @@ print("Whisper baseモデル読み込み完了（サーバーリソース制約�
 
 # リクエストボディのモデル
 class FetchAndTranscribeRequest(BaseModel):
-    device_id: str
-    date: str
+    file_paths: List[str]  # 必須: 処理対象のfile_pathリスト
     model: str = "base"  # baseモデルのみサポート
-    file_paths: List[str] = None  # オプション: 処理対象のfile_pathリスト
 
 async def get_audio_files_from_supabase(device_id: str, date: str, status_filter: str = 'pending') -> List[Dict]:
     """Supabaseのaudio_filesテーブルから該当日の音声ファイル情報を取得"""
@@ -140,34 +138,50 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
             detail=f"モデル {request.model} が読み込まれていません"
         )
     
-    # audio_filesテーブルから未処理（pending）の音声ファイルを取得
-    pending_files = await get_audio_files_from_supabase(request.device_id, request.date, 'pending')
-    
-    # 全ての音声ファイルを取得（統計情報用）
-    all_files = await get_audio_files_from_supabase(request.device_id, request.date, None)
-    
-    # completedステータスのファイル数を計算
-    completed_count = len([f for f in all_files if f['transcriptions_status'] == 'completed'])
-    
-    if not pending_files:
+    # file_pathsパラメータを確認
+    if not request.file_paths or len(request.file_paths) == 0:
+        # file_pathsが空の場合は、処理対象なしとして正常終了
         execution_time = time.time() - start_time
+        
         return {
             "status": "success",
-            "device_id": request.device_id,
-            "date": request.date,
             "summary": {
-                "total_files": len(all_files),
-                "already_completed": completed_count,
+                "total_files": 0,
+                "already_completed": 0,
                 "pending_processed": 0,
                 "errors": 0
             },
             "processed_files": [],
             "execution_time_seconds": round(execution_time, 1),
-            "message": f"処理対象となる音声ファイルがありません（全{len(all_files)}件中{completed_count}件が処理済み）"
+            "message": "処理対象のファイルがありません"
         }
     
-    # pendingステータスのファイルをすべて処理対象とする
-    files_to_process = pending_files
+    logger.info(f"file_pathsパラメータ: {len(request.file_paths)}件のファイルを処理")
+    
+    # 提供されたfile_pathsを使って処理対象ファイルを構築
+    files_to_process = []
+    device_ids = set()
+    dates = set()
+    
+    for file_path in request.file_paths:
+        # file_pathから情報を抽出
+        # 例: files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/14-30/audio.wav
+        parts = file_path.split('/')
+        if len(parts) >= 5:
+            device_id = parts[1]  # d067d407-cf73-4174-a9c1-d91fb60d64d0
+            date_part = parts[2]  # 2025-07-19
+            time_part = parts[3]  # 14-30
+            
+            device_ids.add(device_id)
+            dates.add(date_part)
+            
+            # recorded_atを構築
+            recorded_at = f"{date_part}T{time_part.replace('-', ':')}:00+00:00"
+            files_to_process.append({
+                'file_path': file_path,
+                'device_id': device_id,
+                'recorded_at': recorded_at
+            })
     
     # 実際の音声ダウンロードと文字起こし処理
     # 処理結果を記録
@@ -240,11 +254,8 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
     
     return {
         "status": "success",
-        "device_id": request.device_id,
-        "date": request.date,
         "summary": {
-            "total_files": len(all_files),
-            "already_completed": completed_count,
+            "total_files": len(request.file_paths),
             "pending_processed": len(successfully_transcribed),
             "errors": len(error_files)
         },
@@ -252,7 +263,7 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
         "processed_time_blocks": [f['time_block'] for f in successfully_transcribed],
         "error_files": [f['file_path'] for f in error_files] if error_files else None,
         "execution_time_seconds": round(execution_time, 1),
-        "message": f"pendingステータスの{len(pending_files)}件中{len(successfully_transcribed)}件を正常に処理しました"
+        "message": f"{len(request.file_paths)}件中{len(successfully_transcribed)}件を正常に処理しました"
     }
 
 @app.get("/")
