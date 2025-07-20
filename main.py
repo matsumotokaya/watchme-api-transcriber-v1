@@ -78,35 +78,6 @@ class FetchAndTranscribeRequest(BaseModel):
     file_paths: List[str]  # 必須: 処理対象のfile_pathリスト
     model: str = "base"  # baseモデルのみサポート
 
-async def get_audio_files_from_supabase(device_id: str, date: str, status_filter: str = 'pending') -> List[Dict]:
-    """Supabaseのaudio_filesテーブルから該当日の音声ファイル情報を取得"""
-    try:
-        # recorded_atの日付部分でフィルタリング
-        # 翌日の00:00:00未満として、23:59:59.999...も含めるように修正
-        from datetime import datetime, timedelta
-        start_date = datetime.strptime(date, "%Y-%m-%d")
-        end_date = start_date + timedelta(days=1)
-        
-        query = supabase.table('audio_files') \
-            .select('*') \
-            .eq('device_id', device_id) \
-            .gte('recorded_at', f"{start_date.strftime('%Y-%m-%d')}T00:00:00") \
-            .lt('recorded_at', f"{end_date.strftime('%Y-%m-%d')}T00:00:00")
-        
-        # ステータスフィルタが指定されている場合は適用
-        if status_filter:
-            query = query.eq('transcriptions_status', status_filter)
-            
-        response = query.execute()
-        
-        if status_filter:
-            logger.info(f"audio_filesテーブルから{len(response.data)}件の{status_filter}ステータスの音声ファイルを発見")
-        else:
-            logger.info(f"audio_filesテーブルから{len(response.data)}件の音声ファイルを発見")
-        return response.data
-    except Exception as e:
-        logger.error(f"audio_filesテーブルの取得エラー: {str(e)}")
-        return []
 
 def extract_time_block_from_path(file_path: str) -> str:
     """file_pathからtime_blockを抽出"""
