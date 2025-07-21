@@ -17,7 +17,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${YELLOW}📦 Step 1: プロジェクトをEC2にアップロード${NC}"
-scp -i $KEY_PATH ../api_wisper_v1_updated.tar.gz $EC2_USER@$EC2_HOST:~/
+scp -i $KEY_PATH ../api_whisper_v1_updated.tar.gz $EC2_USER@$EC2_HOST:~/
 
 echo -e "${YELLOW}🔧 Step 2: EC2上でデプロイを実行${NC}"
 ssh -i $KEY_PATH $EC2_USER@$EC2_HOST << 'ENDSSH'
@@ -25,16 +25,16 @@ ssh -i $KEY_PATH $EC2_USER@$EC2_HOST << 'ENDSSH'
     
     # バックアップを作成
     echo "📋 既存のAPIをバックアップ..."
-    if [ -d "api_wisper_v1" ]; then
-        sudo cp -r api_wisper_v1 api_wisper_v1_backup_$(date +%Y%m%d_%H%M%S)
+    if [ -d "api_whisper_v1" ]; then
+        sudo cp -r api_whisper_v1 api_whisper_v1_backup_$(date +%Y%m%d_%H%M%S)
     fi
     
     # 新しいコードを展開
     echo "📂 新しいコードを展開..."
-    tar -xzf api_wisper_v1_updated.tar.gz
+    tar -xzf api_whisper_v1_updated.tar.gz
     
     # ディレクトリに移動
-    cd api_wisper_v1
+    cd api_whisper_v1
     
     # 環境変数ファイルが存在しない場合は作成を促す
     if [ ! -f ".env" ]; then
@@ -59,14 +59,14 @@ ssh -i $KEY_PATH $EC2_USER@$EC2_HOST << 'ENDSSH'
     
     # systemdサービスを再起動
     echo "⚙️  systemdサービスを再起動..."
-    sudo systemctl restart api-wisper
+    sudo systemctl restart api-whisper
     
     # 状態確認
     echo "✅ デプロイ完了！サービス状態を確認..."
-    sudo systemctl status api-wisper --no-pager
+    sudo systemctl status api-whisper --no-pager
     
     # アップロードファイルを削除
-    rm -f ~/api_wisper_v1_updated.tar.gz
+    rm -f ~/api_whisper_v1_updated.tar.gz
     
     echo "🎉 デプロイが正常に完了しました！"
 ENDSSH

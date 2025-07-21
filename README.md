@@ -1,110 +1,19 @@
-# Whisper API for WatchMe - 音声処理APIのリファレンス実装
+# Whisper API - 音声文字起こしAPI
 
-WatchMeエコシステム専用のWhisper音声文字起こしAPI。**このAPIは他の音声処理APIのお手本となるリファレンス実装です。**
+WatchMeプラットフォーム用の音声文字起こしAPI。OpenAI Whisperを使用して音声ファイルをテキストに変換します。
 
-## 🎯 重要：このAPIがリファレンス実装である理由
+## 概要
 
-このAPIは、WatchMeエコシステムにおける音声ファイル処理の標準的な実装パターンを示しています：
+このAPIは、S3に保存された音声ファイルをダウンロードし、OpenAI Whisperモデルを使用してテキストに変換します。変換結果はSupabaseデータベースに保存され、処理ステータスが更新されます。
 
-1. **file_pathベースの処理**: `recorded_at`ではなく`file_path`を主キーとして使用
-2. **ステータス管理**: 処理完了後に`audio_files`テーブルのステータスを更新
-3. **シンプルな責務分離**: 音声処理に特化し、ファイル管理はVault APIに委譲
-
-## 🔄 最新アップデート (2025-07-20)
-
-### ⚡ 重要な設計改善: file_pathベースの処理
-
-#### 変更内容
-1. **技術的負債の完全除去**
-   - **削除**: `recorded_at`を使用していた不要な`get_audio_files_from_supabase`関数を完全削除
-   - **確定**: `file_path`のみを使用するクリーンな実装に統一
-   
-2. **ステータス更新の確実性向上**
-   - **修正前**: 古いコードが実行されていた状態
-   - **修正後**: 最新のコードで`file_path`による直接更新が確実に動作
-   
-3. **本番環境での動作確認**
-   - **デプロイ**: 修正されたコードを本番環境(api.hey-watch.me)にデプロイ完了
-   - **検証**: `transcriptions_status`が`completed`に正しく更新されることを確認済み
-
-### 🏗️ アーキテクチャのベストプラクティス
-
-```python
-# ❌ 悪い例：recorded_atで複雑な時間範囲検索
-update_response = supabase.table('audio_files') \
-    .update({'transcriptions_status': 'completed'}) \
-    .eq('device_id', device_id) \
-    .gte('recorded_at', slot_start) \
-    .lte('recorded_at', slot_end) \
-    .execute()
-
-# ✅ 良い例：file_pathで直接更新
-update_response = supabase.table('audio_files') \
-    .update({'transcriptions_status': 'completed'}) \
-    .eq('file_path', file_path) \
-    .execute()
-```
-
-## 📋 他の音声処理APIへの実装ガイド
-
-### 1. 基本的な処理フロー
-
-```python
-# Step 1: file_pathsを受け取る
-request.file_paths = ["files/device_id/date/time/audio.wav", ...]
-
-# Step 2: 各ファイルを処理
-for file_path in request.file_paths:
-    # S3からダウンロード
-    s3_client.download_file(bucket, file_path, temp_file)
-    
-    # 音声処理を実行（API固有の処理）
-    result = process_audio(temp_file)  # 例：感情分析、音響特徴抽出など
-    
-    # 結果をSupabaseに保存
-    supabase.table('your_table').upsert(result).execute()
-    
-    # ステータスを更新（重要！）
-    supabase.table('audio_files') \
-        .update({'your_status_field': 'completed'}) \
-        .eq('file_path', file_path) \
-        .execute()
-```
-
-### 2. ステータスフィールドの命名規則
-
-各APIは`audio_files`テーブルの専用ステータスフィールドを更新します：
-
-- `transcriptions_status`: Whisper API（このAPI）
-- `emotion_features_status`: 感情分析API
-- `behavior_features_status`: 行動分析API
-- など、`{feature}_status`の形式で命名
-
-### 3. エラーハンドリング
-
-```python
-try:
-    # ステータス更新
-    update_response = supabase.table('audio_files') \
-        .update({'your_status_field': 'completed'}) \
-        .eq('file_path', file_path) \
-        .execute()
-    
-    if update_response.data:
-        logger.info(f"✅ ステータス更新成功: {file_path}")
-    else:
-        logger.warning(f"⚠️ 対象レコードが見つかりません: {file_path}")
-        
-except Exception as e:
-    logger.error(f"❌ ステータス更新エラー: {str(e)}")
-    # エラーでも処理は継続
-```
-
-## 🚀 APIエンドポイント仕様
+## APIエンドポイント
 
 ### POST /fetch-and-transcribe
 
+音声ファイルを取得して文字起こしを実行します。
+
 #### リクエスト
+
 ```json
 {
   "file_paths": [
@@ -114,7 +23,13 @@ except Exception as e:
 }
 ```
 
+#### パラメータ
+
+- `file_paths` (array): 処理する音声ファイルのパス一覧
+- `model` (string, optional): 使用するWhisperモデル（デフォルト: "base"）
+
 #### レスポンス
+
 ```json
 {
   "status": "success",
@@ -131,22 +46,27 @@ except Exception as e:
 }
 ```
 
-## 💾 データベース設計
+## データベース
 
-### audio_filesテーブル（共通）
+### audio_filesテーブル
+
 ```sql
 CREATE TABLE audio_files (
   device_id text NOT NULL,
   recorded_at timestamp WITH TIME ZONE NOT NULL,
-  file_path text UNIQUE NOT NULL,  -- 主キーとして使用
+  file_path text NOT NULL,
   transcriptions_status text DEFAULT 'pending',
-  emotion_features_status text DEFAULT 'pending',
+  file_size_bytes bigint,
+  duration_seconds numeric,
+  created_at timestamp WITH TIME ZONE DEFAULT now(),
   behavior_features_status text DEFAULT 'pending',
-  -- 他のステータスフィールド
+  emotion_features_status text DEFAULT 'pending',
+  PRIMARY KEY (device_id, recorded_at)
 );
 ```
 
-### vibe_whisperテーブル（このAPI固有）
+### vibe_whisperテーブル
+
 ```sql
 CREATE TABLE vibe_whisper (
   device_id text NOT NULL,
@@ -157,12 +77,9 @@ CREATE TABLE vibe_whisper (
 );
 ```
 
-## 🛠️ 開発環境セットアップ
+## 環境変数
 
-### 1. 環境変数の設定
 ```bash
-# .envファイルを作成
-cat > .env << EOF
 # Supabase設定
 SUPABASE_URL=your_supabase_url
 SUPABASE_KEY=your_supabase_key
@@ -172,82 +89,61 @@ AWS_ACCESS_KEY_ID=your_access_key_id
 AWS_SECRET_ACCESS_KEY=your_secret_access_key
 S3_BUCKET_NAME=watchme-vault
 AWS_REGION=us-east-1
-EOF
 ```
 
-### 2. 依存関係のインストール
-```bash
-# macOS開発環境
-python3.12 -m pip install fastapi uvicorn openai-whisper aiohttp boto3 supabase python-dotenv
+## セットアップ
 
-# Ubuntu本番環境
-sudo apt update && sudo apt install -y python3 python3-pip ffmpeg
-pip3 install fastapi uvicorn openai-whisper aiohttp boto3 supabase python-dotenv
+### 依存関係のインストール
+
+```bash
+python3 -m pip install -r requirements.txt
 ```
 
-### 3. ローカル起動
+### ローカル起動
+
 ```bash
-python3.12 main.py
+python3 main.py
 # APIは http://localhost:8001 で起動
 ```
 
-## 🌐 本番環境デプロイ手順
+## デプロイ
 
-### 1. EC2インスタンスへのアップロード
+### 本番環境への自動デプロイ
+
 ```bash
-# ローカルでプロジェクトを圧縮
-tar -czf api_wisper_v1.tar.gz api_wisper_v1
+# 1. プロジェクトを圧縮（親ディレクトリから実行）
+cd /Users/kaya.matsumoto
+tar -czf api_whisper_v1_updated.tar.gz api_whisper_v1
 
-# EC2にアップロード
-scp -i ~/watchme-key.pem api_wisper_v1.tar.gz ubuntu@your-ec2-ip:~/
-
-# EC2で解凍
-ssh -i ~/watchme-key.pem ubuntu@your-ec2-ip
-tar -xzf api_wisper_v1.tar.gz
-cd api_wisper_v1
+# 2. デプロイスクリプトを実行
+cd api_whisper_v1
+./deploy_to_production.sh
 ```
 
-### 2. 環境変数の設定（本番）
+### ローカル Docker Compose
+
 ```bash
-# 本番用の.envファイルを作成
-cp .env.example .env
-nano .env  # 本番環境の認証情報を設定
-```
-
-### 3. Dockerビルドとデプロイ
-```bash
-# 既存のコンテナを停止
-sudo docker-compose down
-
-# 新しいイメージをビルド
-sudo docker-compose build
-
-# コンテナを起動
-sudo docker-compose up -d
+# コンテナ起動
+docker-compose up -d
 
 # ログ確認
-sudo docker-compose logs -f
+docker-compose logs -f
 ```
 
-### 4. systemdサービスの再起動
+### システムサービス（本番環境）
+
 ```bash
-# サービスを再起動
-sudo systemctl restart api-wisper
+# サービス再起動
+sudo systemctl restart api-whisper
 
 # 状態確認
-sudo systemctl status api-wisper
-
-# リアルタイムログ
-sudo journalctl -u api-wisper -f
+sudo systemctl status api-whisper
 ```
 
-### 5. 動作確認
-```bash
-# 本番環境のヘルスチェック
-curl https://api.hey-watch.me/vibe-transcriber/
+## 動作テスト
 
-# 本番環境でのテスト
-curl -X POST "https://api.hey-watch.me/vibe-transcriber/fetch-and-transcribe" \
+```bash
+curl -X POST "http://localhost:8001/fetch-and-transcribe" \
   -H "Content-Type: application/json" \
   -d '{
     "file_paths": [
@@ -257,43 +153,8 @@ curl -X POST "https://api.hey-watch.me/vibe-transcriber/fetch-and-transcribe" \
   }'
 ```
 
-## ⚠️ 重要な注意事項
+## 注意事項
 
-### メモリ制限
-- 本番環境（t4g.small, 2GB RAM）では**baseモデルのみ**使用可能
-- より大きなモデルを使用する場合はEC2インスタンスのアップグレードが必要
-
-### パフォーマンス
-- 1分の音声: 約2-3秒で処理
-- 並列処理は実装されていない（メモリ節約のため）
-
-### セキュリティ
-- 環境変数で認証情報を管理
-- S3へのアクセスはIAMロールで制限
-- Supabaseはanon keyを使用（RLSで保護）
-
-## 🔍 トラブルシューティング
-
-### ステータスが更新されない場合
-1. `file_path`が正確に一致しているか確認
-2. `audio_files`テーブルにレコードが存在するか確認
-3. ログでエラーメッセージを確認
-
-### メモリ不足エラー
-```bash
-# スワップメモリを追加
-sudo fallocate -l 2G /swapfile
-sudo chmod 600 /swapfile
-sudo mkswap /swapfile
-sudo swapon /swapfile
-```
-
-## 📞 関連ドキュメント
-
-- [Vault API](../api_vault_v1/README.md) - 音声ファイルのアップロード管理
-- [感情分析API](../api_emotion_v1/README.md) - 音声から感情を分析
-- [行動分析API](../api_behavior_v1/README.md) - 音声から行動パターンを分析
-
----
-
-**このAPIは、WatchMeエコシステムにおける音声処理APIの標準的な実装パターンを示すリファレンス実装です。新しい音声処理APIを実装する際は、このREADMEとコードを参考にしてください。**
+- 本番環境（t4g.small, 2GB RAM）ではbaseモデルのみ使用可能
+- より大きなモデルを使用する場合はインスタンスのアップグレードが必要
+- 1分の音声ファイルの処理時間は約2-3秒

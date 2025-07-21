@@ -1,7 +1,7 @@
 # API Whisper v1 - 本番環境デプロイメントガイド
 
 ## 概要
-このドキュメントは、api_wisper_v1をDockerを使用して本番環境にデプロイする手順を説明します。
+このドキュメントは、api_whisper_v1をDockerを使用して本番環境にデプロイする手順を説明します。
 
 ## 前提条件
 - Docker 20.10以上
@@ -14,7 +14,7 @@
 ### 1. プロジェクトのクローン
 ```bash
 git clone [your-repository-url]
-cd api_wisper_v1
+cd api_whisper_v1
 ```
 
 ### 2. 環境変数の設定
@@ -113,7 +113,7 @@ docker-compose up -d
 ### Whisperモデルキャッシュの管理
 ```bash
 # キャッシュサイズの確認
-docker volume inspect api_wisper_v1_whisper_cache
+docker volume inspect api_whisper_v1_whisper_cache
 
 # 不要な場合のキャッシュ削除
 docker-compose down -v
