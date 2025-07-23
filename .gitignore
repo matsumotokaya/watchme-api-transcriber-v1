@@ -50,3 +50,7 @@ Thumbs.db
 # Logs
 logs/
 *.log 
+
+# Archives
+*.tar.gz
+*.zip

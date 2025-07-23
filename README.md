@@ -108,7 +108,82 @@ python3 main.py
 
 ## デプロイ
 
-### 本番環境への自動デプロイ
+### ECRベースのデプロイ（推奨）
+
+ECR（Elastic Container Registry）を使用したデプロイ方法：
+
+```bash
+# 1. DockerイメージをビルドしてECRにプッシュ
+./build-and-push-ecr.sh [TAG]  # TAGを指定しない場合はlatestになります
+
+# 2. EC2にデプロイ（Systemd + Docker）
+./deploy-ecr.sh [TAG]
+```
+
+ECRリポジトリ: `754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-api-transcriber`
+
+#### Systemdの役割と利点
+
+本番環境では、Systemdを使用してDockerコンテナを管理しています。これにより以下の利点があります：
+
+1. **自動起動**: サーバー再起動時に自動的にサービスが起動
+2. **自動再起動**: プロセスがクラッシュした場合、自動的に再起動
+3. **ログ管理**: journalctlで統一的にログを管理
+4. **依存関係管理**: Dockerサービスの起動後に実行されることを保証
+5. **リソース管理**: CPU/メモリの使用制限が可能
+
+#### Systemdサービス構成
+
+サービス名: `api-transcriber.service`
+
+主な設定：
+- **Type=simple**: フォアグラウンドでDockerコンテナを実行
+- **Restart=always**: 常に再起動（10秒間隔）
+- **After=docker.service**: Dockerサービス起動後に実行
+- **EnvironmentFile**: 環境変数は`/home/ubuntu/api_whisper_v1/.env`から読み込み
+
+#### サービス管理コマンド
+
+```bash
+# サービスの状態確認
+sudo systemctl status api-transcriber
+
+# サービスの起動/停止/再起動
+sudo systemctl start api-transcriber
+sudo systemctl stop api-transcriber
+sudo systemctl restart api-transcriber
+
+# ログの確認（リアルタイム）
+sudo journalctl -u api-transcriber -f
+
+# ログの確認（最新50行）
+sudo journalctl -u api-transcriber -n 50
+
+# サービスの有効化/無効化（自動起動の設定）
+sudo systemctl enable api-transcriber   # 自動起動を有効化
+sudo systemctl disable api-transcriber  # 自動起動を無効化
+```
+
+#### デプロイフロー
+
+1. **ローカル環境でDockerイメージをビルド**
+   - Dockerfileに基づいてイメージを作成
+   - 必要な依存関係とアプリケーションコードを含む
+
+2. **ECRにイメージをプッシュ**
+   - AWS ECRにログイン
+   - イメージにタグを付けてプッシュ
+
+3. **EC2でSystemdサービスを更新**
+   - 既存のコンテナを停止
+   - ECRから最新イメージをプル
+   - Systemdサービスとして起動
+
+4. **ヘルスチェック**
+   - コンテナ内部でcurlによるヘルスチェック
+   - Systemdによる死活監視
+
+### 本番環境への従来のデプロイ方法
 
 ```bash
 # 1. プロジェクトを圧縮（親ディレクトリから実行）
@@ -138,6 +213,9 @@ sudo systemctl restart api-whisper
 
 # 状態確認
 sudo systemctl status api-whisper
+
+# ログ確認
+sudo journalctl -u api-whisper -f
 ```
 
 ## 動作テスト

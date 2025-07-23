@@ -1,0 +1,42 @@
+[Unit]
+Description=Whisper Transcriber API Service (ECR)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+User=ubuntu
+Group=docker
+
+# 環境変数
+EnvironmentFile=/home/ubuntu/api_whisper_v1/.env
+
+# ECR設定
+Environment="AWS_REGION=ap-southeast-2"
+Environment="ECR_URI=754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-api-transcriber:latest"
+Environment="CONTAINER_NAME=api-transcriber"
+
+# 起動前処理
+ExecStartPre=/bin/bash -c 'docker stop ${CONTAINER_NAME} || true'
+ExecStartPre=/bin/bash -c 'docker rm ${CONTAINER_NAME} || true'
+ExecStartPre=/bin/bash -c 'docker pull ${ECR_URI}'
+
+# コンテナ起動
+ExecStart=/usr/bin/docker run --rm \
+  --name ${CONTAINER_NAME} \
+  -p 8001:8001 \
+  --env-file /home/ubuntu/api_whisper_v1/.env \
+  --health-cmd="curl -f http://localhost:8001/ || exit 1" \
+  --health-interval=30s \
+  --health-timeout=10s \
+  --health-start-period=60s \
+  --health-retries=3 \
+  ${ECR_URI}
+
+# 停止処理
+ExecStop=/usr/bin/docker stop ${CONTAINER_NAME}
+
+[Install]
+WantedBy=multi-user.target
