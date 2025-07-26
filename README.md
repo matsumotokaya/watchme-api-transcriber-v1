@@ -6,6 +6,11 @@ WatchMeプラットフォーム用の音声文字起こしAPI。OpenAI Whisper�
 
 このAPIは、S3に保存された音声ファイルをダウンロードし、OpenAI Whisperモデルを使用してテキストに変換します。変換結果はSupabaseデータベースに保存され、処理ステータスが更新されます。
 
+## 本番環境エンドポイント
+
+- **Gateway経由**: `https://api.hey-watch.me/vibe-transcriber/`
+- **内部ポート**: `8001`
+
 ## APIエンドポイント
 
 ### POST /fetch-and-transcribe
@@ -108,47 +113,45 @@ python3 main.py
 
 ## デプロイ
 
-### ECRベースのデプロイ（推奨）
+### 推奨デプロイフロー（ECRベース）
 
-ECR（Elastic Container Registry）を使用したデプロイ方法：
+ECR（Elastic Container Registry）を使用したデプロイ方法が推奨です：
+
+#### ステップ1: DockerイメージをビルドしてECRにプッシュ
 
 ```bash
-# 1. DockerイメージをビルドしてECRにプッシュ
-./build-and-push-ecr.sh [TAG]  # TAGを指定しない場合はlatestになります
+# スクリプトを実行（TAGは省略可能、デフォルトは "latest"）
+# 例: ./build-and-push-ecr.sh v1.2
+./build-and-push-ecr.sh [TAG]
+```
 
-# 2. EC2にデプロイ（Systemd + Docker）
+このスクリプトは、内部で `docker build` を実行し、AWS ECRにログイン後、イメージをプッシュします。
+
+#### ステップ2: 新しいイメージをEC2にデプロイ
+
+```bash
+# スクリプトを実行（TAGはステップ1で指定したものと同じものを指定）
+# 例: ./deploy-ecr.sh v1.2
 ./deploy-ecr.sh [TAG]
 ```
 
-ECRリポジトリ: `754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-api-transcriber`
+このスクリプトは、内部で以下の処理を自動的に行います：
+1. `systemd/api-transcriber.service` ファイルをEC2にアップロード
+2. SSHでEC2に接続
+3. 古いDockerコンテナを停止・削除
+4. ECRから新しいバージョンのイメージをプル
+5. Systemdサービスをリロードし、新しいコンテナでサービスを起動
+6. サービスの稼働状態とヘルスチェックを実行
 
-#### Systemdの役割と利点
+#### サーバーでのサービス管理 (Systemd)
 
-本番環境では、Systemdを使用してDockerコンテナを管理しています。これにより以下の利点があります：
-
-1. **自動起動**: サーバー再起動時に自動的にサービスが起動
-2. **自動再起動**: プロセスがクラッシュした場合、自動的に再起動
-3. **ログ管理**: journalctlで統一的にログを管理
-4. **依存関係管理**: Dockerサービスの起動後に実行されることを保証
-5. **リソース管理**: CPU/メモリの使用制限が可能
-
-#### Systemdサービス構成
-
-サービス名: `api-transcriber.service`
-
-主な設定：
-- **Type=simple**: フォアグラウンドでDockerコンテナを実行
-- **Restart=always**: 常に再起動（10秒間隔）
-- **After=docker.service**: Dockerサービス起動後に実行
-- **EnvironmentFile**: 環境変数は`/home/ubuntu/api_whisper_v1/.env`から読み込み
-
-#### サービス管理コマンド
+本番EC2サーバー上では、`api-transcriber.service` という名前でサービスが管理されています（注：`api-wisper.service`ではありません）。
 
 ```bash
 # サービスの状態確認
 sudo systemctl status api-transcriber
 
-# サービスの起動/停止/再起動
+# サービスの起動 / 停止 / 再起動
 sudo systemctl start api-transcriber
 sudo systemctl stop api-transcriber
 sudo systemctl restart api-transcriber
@@ -156,72 +159,58 @@ sudo systemctl restart api-transcriber
 # ログの確認（リアルタイム）
 sudo journalctl -u api-transcriber -f
 
-# ログの確認（最新50行）
-sudo journalctl -u api-transcriber -n 50
-
-# サービスの有効化/無効化（自動起動の設定）
-sudo systemctl enable api-transcriber   # 自動起動を有効化
-sudo systemctl disable api-transcriber  # 自動起動を無効化
+# サービスの自動起動設定
+sudo systemctl enable api-transcriber   # 有効化
+sudo systemctl disable api-transcriber  # 無効化
 ```
 
-#### デプロイフロー
+#### ECRリポジトリ情報
 
-1. **ローカル環境でDockerイメージをビルド**
-   - Dockerfileに基づいてイメージを作成
-   - 必要な依存関係とアプリケーションコードを含む
+- リポジトリ: `754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-api-transcriber`
+- リージョン: `ap-southeast-2`
 
-2. **ECRにイメージをプッシュ**
-   - AWS ECRにログイン
-   - イメージにタグを付けてプッシュ
+### ローカル開発環境での起動
 
-3. **EC2でSystemdサービスを更新**
-   - 既存のコンテナを停止
-   - ECRから最新イメージをプル
-   - Systemdサービスとして起動
-
-4. **ヘルスチェック**
-   - コンテナ内部でcurlによるヘルスチェック
-   - Systemdによる死活監視
-
-### 本番環境への従来のデプロイ方法
+ローカルでの開発やテストには `docker-compose` を使用します。
 
 ```bash
-# 1. プロジェクトを圧縮（親ディレクトリから実行）
-cd /Users/kaya.matsumoto
-tar -czf api_whisper_v1_updated.tar.gz api_whisper_v1
+# .env ファイルを準備した後、コンテナをビルドして起動
+docker-compose up --build -d
 
-# 2. デプロイスクリプトを実行
-cd api_whisper_v1
-./deploy_to_production.sh
-```
-
-### ローカル Docker Compose
-
-```bash
-# コンテナ起動
-docker-compose up -d
-
-# ログ確認
+# ログの確認
 docker-compose logs -f
-```
 
-### システムサービス（本番環境）
-
-```bash
-# サービス再起動
-sudo systemctl restart api-whisper
-
-# 状態確認
-sudo systemctl status api-whisper
-
-# ログ確認
-sudo journalctl -u api-whisper -f
+# 停止
+docker-compose down
 ```
 
 ## 動作テスト
 
+### ローカル環境でのテスト
+
 ```bash
+# ヘルスチェック
+curl http://localhost:8001/
+
+# 文字起こしAPIテスト
 curl -X POST "http://localhost:8001/fetch-and-transcribe" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file_paths": [
+      "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/14-30/audio.wav"
+    ],
+    "model": "base"
+  }'
+```
+
+### 本番環境でのテスト
+
+```bash
+# ヘルスチェック
+curl https://api.hey-watch.me/vibe-transcriber/
+
+# 文字起こしAPIテスト（Gateway経由）
+curl -X POST "https://api.hey-watch.me/vibe-transcriber/fetch-and-transcribe" \
   -H "Content-Type: application/json" \
   -d '{
     "file_paths": [
@@ -235,4 +224,66 @@ curl -X POST "http://localhost:8001/fetch-and-transcribe" \
 
 - 本番環境（t4g.small, 2GB RAM）ではbaseモデルのみ使用可能
 - より大きなモデルを使用する場合はインスタンスのアップグレードが必要
-- 1分の音声ファイルの処理時間は約2-3秒
+- 1分の音声ファイルの処理時間は約2-3秒（大きなファイルの場合は処理時間が長くなる可能性があります）
+
+## トラブルシューティング
+
+### 処理がタイムアウトに見える場合
+
+APIリクエストがタイムアウトしても、バックグラウンドで処理は継続されています。以下の点を確認してください：
+
+1. **Dockerログの確認**
+   ```bash
+   docker logs api_wisper_v1 --tail 100
+   ```
+
+2. **Whisperモデルの初回ダウンロード**
+   - コンテナ初回起動時、Whisperモデル（約139MB）のダウンロードが発生します
+   - Dockerfileに事前ダウンロードの設定を追加済みですが、イメージの再ビルドが必要です
+
+3. **デバッグログの活用**
+   - Supabaseへの書き込み結果を詳細にログ出力するようになっています
+   - `Supabase upsert response data`でデータベースへの書き込み成功を確認できます
+
+### よくある問題と解決策
+
+1. **「サイレントフェイラー」に見える現象**
+   - 症状：APIログでは成功と表示されるが、データベースにデータがない
+   - 原因：多くの場合、処理中または別のデータを確認している
+   - 解決：処理完了まで待ち、正しいタイムブロックのデータを確認
+
+2. **処理時間の長さ**
+   - 原因：音声ファイルのサイズ、Whisperモデルの処理負荷
+   - 対策：タイムアウト値を延長するか、非同期処理として扱う
+
+3. **日付の確認**
+   - vibe_whisperテーブルの日付は正しく保存されます
+   - タイムゾーンはUTCで統一されています
+
+## 最近の改善内容
+
+### 2025年7月の改善
+
+1. **デバッグログの追加**
+   - Supabaseへの書き込み応答を詳細にログ出力
+   - 空のレスポンスの場合はエラーとして扱うように改善
+   ```python
+   logger.info(f"Supabase upsert response data: {response.data}")
+   logger.info(f"Supabase upsert response count: {response.count}")
+   ```
+
+2. **Dockerfileの最適化**
+   - Whisperモデルをビルド時に事前ダウンロード
+   - コンテナ再起動時のモデル再ダウンロードを防止
+   ```dockerfile
+   RUN python -c "import whisper; whisper.load_model('base')"
+   ```
+
+3. **エラーハンドリングの強化**
+   - Supabaseからの空レスポンスを検出
+   - 処理失敗時の詳細なエラー情報を記録
+
+4. **ドキュメントの充実**
+   - 本番環境のエンドポイント情報を追加
+   - systemdサービス名の正確な記載
+   - トラブルシューティングセクションの追加

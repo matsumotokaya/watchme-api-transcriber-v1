@@ -16,6 +16,9 @@ RUN mkdir -p /root/.cache/whisper
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Whisperモデルを事前にダウンロード
+RUN python -c "import whisper; whisper.load_model('base')"
+
 # アプリケーションをコピー
 COPY main.py .
 COPY .env .

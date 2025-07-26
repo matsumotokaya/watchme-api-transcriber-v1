@@ -195,6 +195,19 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
                     # upsert（既存データは更新、新規データは挿入）
                     response = supabase.table('vibe_whisper').upsert(data).execute()
                     
+                    # ■■■ START: 詳細なデバッグログを追加 ■■■
+                    # Supabaseからの応答を詳細にログ出力
+                    logger.info(f"Supabase upsert response data: {response.data}")
+                    logger.info(f"Supabase upsert response count: {response.count}")
+                    
+                    # 応答にエラーが含まれていないか、データが空でないかを確認
+                    if not response.data:
+                        logger.error("❌ Supabase returned an empty response or an error.")
+                        logger.error(f"   - Full response object: {response}")
+                        # エラーとして扱い、処理を中断
+                        raise Exception("Supabase upsert failed with empty response.")
+                    # ■■■ END: 詳細なデバッグログを追加 ■■■
+                    
                     # audio_filesテーブルのtranscriptions_statusをcompletedに更新
                     # file_pathで直接更新する（シンプルで正確）
                     try:
