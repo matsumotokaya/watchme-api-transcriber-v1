@@ -30,8 +30,8 @@ ssh -i ${KEY_PATH} ${EC2_USER}@${EC2_HOST} << ENDSSH
     
     # 既存のDockerコンテナを停止
     echo "🐳 既存のDockerコンテナを停止..."
-    sudo docker stop api_wisper_v1 || true
-    sudo docker rm api_wisper_v1 || true
+    sudo docker stop api_whisper_v1 || true
+    sudo docker rm api_whisper_v1 || true
     
     # docker-composeも停止
     if [ -d "api_whisper_v1" ]; then
