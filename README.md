@@ -2,20 +2,45 @@
 
 WatchMeプラットフォーム用の音声文字起こしAPI。OpenAI Whisperを使用して音声ファイルをテキストに変換します。
 
+**⚠️ 重要**: このAPIは行動グラフ、感情グラフなど他のAPIのリファレンス実装となっています。
+
 ## 概要
 
 このAPIは、S3に保存された音声ファイルをダウンロードし、OpenAI Whisperモデルを使用してテキストに変換します。変換結果はSupabaseデータベースに保存され、処理ステータスが更新されます。
+
+### 主な特徴
+
+- **効率的なデータベース検索**: `local_date`と`time_block`インデックスを活用
+- **データの一貫性保証**: リクエストパラメータを直接データベースに保存
+- **後方互換性**: 既存の`file_paths`インターフェースもサポート
 
 ## 本番環境エンドポイント
 
 - **Gateway経由**: `https://api.hey-watch.me/vibe-transcriber/`
 - **内部ポート**: `8001`
 
+## 🔄 APIマネージャーからの呼び出し方
+
+APIマネージャーからこのAPIを呼び出す際は、新しいインターフェースを使用してください：
+
+```python
+# APIマネージャーからの呼び出し例
+requests.post(
+    "https://api.hey-watch.me/vibe-transcriber/fetch-and-transcribe",
+    json={
+        "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
+        "local_date": "2025-08-05",
+        "time_blocks": ["09-30", "10-00"],  # 省略可
+        "model": "base"
+    }
+)
+```
+
 ## APIエンドポイント
 
 ### POST /fetch-and-transcribe
 
-音声ファイルを取得して文字起こしを実行します。
+音声ファイルのfile_pathを直接指定して文字起こしを実行します。
 
 #### リクエスト
 
@@ -61,13 +86,17 @@ CREATE TABLE audio_files (
   recorded_at timestamp WITH TIME ZONE NOT NULL,
   file_path text NOT NULL,
   transcriptions_status text DEFAULT 'pending',
-  file_size_bytes bigint,
-  duration_seconds numeric,
   created_at timestamp WITH TIME ZONE DEFAULT now(),
   behavior_features_status text DEFAULT 'pending',
   emotion_features_status text DEFAULT 'pending',
+  local_date date,
+  time_block varchar(5),
   PRIMARY KEY (device_id, recorded_at)
 );
+
+-- インデックス
+CREATE INDEX idx_audio_files_device_date ON audio_files(device_id, local_date);
+CREATE INDEX idx_audio_files_device_date_block ON audio_files(device_id, local_date, time_block);
 ```
 
 ### vibe_whisperテーブル
@@ -96,6 +125,43 @@ S3_BUCKET_NAME=watchme-vault
 AWS_REGION=us-east-1
 ```
 
+## Git 運用ルール（ブランチベース開発フロー）
+
+このプロジェクトでは、**ブランチベースの開発フロー**を採用しています。  
+main ブランチで直接開発せず、以下のルールに従って作業を進めてください。
+
+---
+
+### 🔹 運用ルール概要
+
+1. `main` ブランチは常に安定した状態を保ちます（リリース可能な状態）。
+2. 開発作業はすべて **`feature/xxx` ブランチ** で行ってください。
+3. 作業が完了したら、GitHub上で Pull Request（PR）を作成し、差分を確認した上で `main` にマージしてください。
+4. **1人開発の場合でも、必ずPRを経由して `main` にマージしてください**（レビューは不要、自分で確認＆マージOK）。
+
+---
+
+### 🔧 ブランチ運用の手順
+
+#### 1. `main` を最新化して作業ブランチを作成
+```bash
+git checkout main
+git pull origin main
+git checkout -b feature/機能名
+```
+
+#### 2. 作業内容をコミット
+```bash
+git add .
+git commit -m "変更内容の説明"
+```
+
+#### 3. リモートにプッシュしてPR作成
+```bash
+git push origin feature/機能名
+# GitHub上でPull Requestを作成
+```
+
 ## セットアップ
 
 ### 依存関係のインストール
@@ -109,6 +175,15 @@ python3 -m pip install -r requirements.txt
 ```bash
 python3 main.py
 # APIは http://localhost:8001 で起動
+```
+
+**注意**: APIサーバーはフォアグラウンドで実行されます。テストを実行する場合は、別のターミナルウィンドウを開いてテストスクリプトを実行してください。
+
+バックグラウンドで起動する場合:
+```bash
+nohup python3 main.py > api.log 2>&1 &
+# ログを確認: tail -f api.log
+# プロセスを停止: pkill -f "python3 main.py"
 ```
 
 ## デプロイ
@@ -186,6 +261,17 @@ docker-compose down
 
 ## 動作テスト
 
+### テストスクリプトの実行
+
+```bash
+# APIを起動した後、テストスクリプトを実行
+python3 test_api.py
+
+# CSVデータを使用したテスト
+python3 test_with_csv.py        # audio_files_rows.csvを使用
+python3 test_with_csv_new.py    # audio_files_rows (1).csvを使用
+```
+
 ### ローカル環境でのテスト
 
 ```bash
@@ -245,6 +331,21 @@ APIリクエストがタイムアウトしても、バックグラウンドで�
    - Supabaseへの書き込み結果を詳細にログ出力するようになっています
    - `Supabase upsert response data`でデータベースへの書き込み成功を確認できます
 
+### 2025年8月の改善
+
+1. **device_id/local_date/time_blocksインターフェースの追加**
+   - データベースの`local_date`と`time_block`インデックスを活用した高速検索
+   - リクエストパラメータをそのままvibe_whisperテーブルに保存（データの一貫性保証）
+   - file_pathからの情報抽出を最小限に削減
+
+2. **後方互換性の維持**
+   - 既存のfile_pathsインターフェースも継続サポート
+   - 1つのエンドポイントで両方のインターフェースを処理
+
+3. **テストでの検証済み**
+   - 新インターフェース: 2025-08-05の09-30, 10-30のデータで正常動作確認
+   - 既存インターフェース: 後方互換性を維持
+
 ### よくある問題と解決策
 
 1. **「サイレントフェイラー」に見える現象**
@@ -260,7 +361,68 @@ APIリクエストがタイムアウトしても、バックグラウンドで�
    - vibe_whisperテーブルの日付は正しく保存されます
    - タイムゾーンはUTCで統一されています
 
+## 🎯 他のAPIへの適用ガイド
+
+この実装パターンは、行動グラフAPI、感情グラフAPIなど、同様の構造を持つ他のAPIにも適用できます。
+
+### 修正のポイント
+
+1. **リクエストモデルの変更**
+   ```python
+   # 新しいインターフェースを追加
+   device_id: Optional[str] = None
+   local_date: Optional[str] = None
+   time_blocks: Optional[List[str]] = None
+   
+   # 既存のインターフェースを保持
+   file_paths: Optional[List[str]] = None
+   ```
+
+2. **データベース検索の変更**
+   ```python
+   # audio_filesテーブルから検索
+   query = supabase.table('audio_files') \
+       .select('file_path, device_id, local_date, time_block') \
+       .eq('device_id', request.device_id) \
+       .eq('local_date', request.local_date) \
+       .eq('ステータスカラム名', 'pending')
+   ```
+
+3. **データ保存の一貫性**
+   ```python
+   # リクエストパラメータを直接使用
+   data = {
+       "device_id": device_id,
+       "date": local_date,  # リクエストから受け取った値を使用
+       "time_block": time_block,
+       "結果カラム": result
+   }
+   ```
+
+4. **インデックスの活用**
+   - `idx_audio_files_device_date`
+   - `idx_audio_files_device_date_block`
+
+### 各APIでの変更箇所
+
+| API | ステータスカラム | 結果テーブル | 結果カラム |
+|-----|--------------|------------|----------|
+| Whisper API | transcriptions_status | vibe_whisper | transcription |
+| 行動グラフAPI | behavior_features_status | vibe_behavior | behavior_data |
+| 感情グラフAPI | emotion_features_status | vibe_emotion | emotion_data |
+
 ## 最近の改善内容
+
+### 2025年8月の改善
+
+1. **device_id/local_date/time_blocksインターフェースの追加**
+   - データベースの`local_date`と`time_block`インデックスを活用した高速検索
+   - リクエストパラメータをそのままvibe_whisperテーブルに保存（データの一貫性保証）
+   - file_pathからの情報抽出を最小限に削減
+
+2. **後方互換性の維持**
+   - 既存のfile_pathsインターフェースも継続サポート
+   - 1つのエンドポイントで両方のインターフェースを処理
 
 ### 2025年7月の改善
 

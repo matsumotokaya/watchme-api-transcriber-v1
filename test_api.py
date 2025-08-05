@@ -1,54 +1,172 @@
 #!/usr/bin/env python3
 """
-Whisper API動作確認テスト
-file_pathを使ったステータス更新が正しく動作するか確認
+API Whisper v1 - テストスクリプト
+新しいdevice_id/local_date/time_blocksインターフェースと
+既存のfile_pathsインターフェースの両方をテスト
 """
 
 import requests
 import json
+import sys
+from datetime import datetime
 
-# APIエンドポイント
-API_URL = "http://localhost:8001/fetch-and-transcribe"
+# APIエンドポイントの設定
+API_BASE_URL = "http://localhost:8001"
+ENDPOINT = "/fetch-and-transcribe"
 
-# テストデータ
-test_request = {
-    "file_paths": [
-        "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/14-30/audio.wav"
-    ],
-    "model": "base"
-}
-
-print("=== Whisper API動作確認テスト ===")
-print(f"リクエストURL: {API_URL}")
-print(f"リクエストデータ: {json.dumps(test_request, indent=2)}")
-print()
-
-try:
-    # APIリクエストを送信
-    response = requests.post(API_URL, json=test_request)
+def test_new_interface():
+    """新しいインターフェースのテスト: device_id + local_date + time_blocks"""
+    print("\n=== 新しいインターフェースのテスト ===")
     
-    # レスポンスを確認
-    print(f"ステータスコード: {response.status_code}")
-    print(f"レスポンス: {json.dumps(response.json(), indent=2, ensure_ascii=False)}")
+    # テストケース1: 特定の時間ブロックを指定
+    payload = {
+        "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
+        "local_date": "2025-07-19",
+        "time_blocks": ["14-30", "15-00"],
+        "model": "base"
+    }
     
-    if response.status_code == 200:
-        result = response.json()
-        print("\n=== 処理結果サマリー ===")
-        print(f"総ファイル数: {result['summary']['total_files']}")
-        print(f"処理済み: {result['summary']['pending_processed']}")
-        print(f"エラー: {result['summary']['errors']}")
-        print(f"実行時間: {result['execution_time_seconds']}秒")
+    print(f"\nテスト1: 特定の時間ブロックを指定")
+    print(f"リクエスト: {json.dumps(payload, indent=2)}")
+    
+    try:
+        response = requests.post(f"{API_BASE_URL}{ENDPOINT}", json=payload)
+        print(f"ステータスコード: {response.status_code}")
+        print(f"レスポンス: {json.dumps(response.json(), indent=2, ensure_ascii=False)}")
         
-        if result['summary']['pending_processed'] > 0:
-            print("\n✅ ステータス更新が正常に動作しています。")
+        if response.status_code == 200:
+            result = response.json()
+            print(f"✅ 成功: {result['summary']['pending_processed']}件処理")
         else:
-            print("\n⚠️ ファイルが処理されませんでした。S3にファイルが存在するか確認してください。")
-    else:
-        print("\n❌ APIエラーが発生しました。")
+            print(f"❌ エラー: {response.text}")
+    except Exception as e:
+        print(f"❌ リクエストエラー: {str(e)}")
+    
+    # テストケース2: 時間ブロックを指定しない（全時間帯）
+    payload = {
+        "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0", 
+        "local_date": "2025-07-19",
+        "model": "base"
+    }
+    
+    print(f"\n\nテスト2: 時間ブロックを指定しない（全時間帯）")
+    print(f"リクエスト: {json.dumps(payload, indent=2)}")
+    
+    try:
+        response = requests.post(f"{API_BASE_URL}{ENDPOINT}", json=payload)
+        print(f"ステータスコード: {response.status_code}")
+        print(f"レスポンス: {json.dumps(response.json(), indent=2, ensure_ascii=False)}")
         
-except requests.exceptions.ConnectionError:
-    print("❌ APIに接続できません。サーバーが起動しているか確認してください。")
-except Exception as e:
-    print(f"❌ エラーが発生しました: {str(e)}")
+        if response.status_code == 200:
+            result = response.json()
+            print(f"✅ 成功: {result['summary']['pending_processed']}件処理")
+        else:
+            print(f"❌ エラー: {response.text}")
+    except Exception as e:
+        print(f"❌ リクエストエラー: {str(e)}")
 
-print("\n=== テスト完了 ===")
+def test_legacy_interface():
+    """既存のインターフェースのテスト: file_paths"""
+    print("\n\n=== 既存のインターフェースのテスト（後方互換性） ===")
+    
+    payload = {
+        "file_paths": [
+            "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/14-30/audio.wav",
+            "files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/15-00/audio.wav"
+        ],
+        "model": "base"
+    }
+    
+    print(f"リクエスト: {json.dumps(payload, indent=2)}")
+    
+    try:
+        response = requests.post(f"{API_BASE_URL}{ENDPOINT}", json=payload)
+        print(f"ステータスコード: {response.status_code}")
+        print(f"レスポンス: {json.dumps(response.json(), indent=2, ensure_ascii=False)}")
+        
+        if response.status_code == 200:
+            result = response.json()
+            print(f"✅ 成功: {result['summary']['pending_processed']}件処理")
+        else:
+            print(f"❌ エラー: {response.text}")
+    except Exception as e:
+        print(f"❌ リクエストエラー: {str(e)}")
+
+def test_error_cases():
+    """エラーケースのテスト"""
+    print("\n\n=== エラーケースのテスト ===")
+    
+    # テストケース1: パラメータが不足
+    payload = {
+        "model": "base"
+    }
+    
+    print(f"\nテスト1: パラメータが不足")
+    print(f"リクエスト: {json.dumps(payload, indent=2)}")
+    
+    try:
+        response = requests.post(f"{API_BASE_URL}{ENDPOINT}", json=payload)
+        print(f"ステータスコード: {response.status_code}")
+        print(f"レスポンス: {json.dumps(response.json(), indent=2, ensure_ascii=False)}")
+        
+        if response.status_code == 400:
+            print(f"✅ 期待通りのエラー")
+        else:
+            print(f"❌ 予期しないレスポンス")
+    except Exception as e:
+        print(f"❌ リクエストエラー: {str(e)}")
+    
+    # テストケース2: サポートされていないモデル
+    payload = {
+        "device_id": "d067d407-cf73-4174-a9c1-d91fb60d64d0",
+        "local_date": "2025-07-19", 
+        "model": "large"  # サポートされていない
+    }
+    
+    print(f"\n\nテスト2: サポートされていないモデル")
+    print(f"リクエスト: {json.dumps(payload, indent=2)}")
+    
+    try:
+        response = requests.post(f"{API_BASE_URL}{ENDPOINT}", json=payload)
+        print(f"ステータスコード: {response.status_code}")
+        print(f"レスポンス: {json.dumps(response.json(), indent=2, ensure_ascii=False)}")
+        
+        if response.status_code == 400:
+            print(f"✅ 期待通りのエラー")
+        else:
+            print(f"❌ 予期しないレスポンス")
+    except Exception as e:
+        print(f"❌ リクエストエラー: {str(e)}")
+
+def test_health_check():
+    """ヘルスチェック"""
+    print("\n=== ヘルスチェック ===")
+    
+    try:
+        response = requests.get(f"{API_BASE_URL}/")
+        print(f"ステータスコード: {response.status_code}")
+        print(f"レスポンス: {json.dumps(response.json(), indent=2, ensure_ascii=False)}")
+        
+        if response.status_code == 200:
+            print(f"✅ APIは正常に稼働しています")
+        else:
+            print(f"❌ APIに問題があります")
+    except Exception as e:
+        print(f"❌ APIに接続できません: {str(e)}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    print("API Whisper v1 テストスクリプト")
+    print("================================")
+    print(f"API URL: {API_BASE_URL}")
+    print(f"実行時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # ヘルスチェック
+    test_health_check()
+    
+    # 各種テストの実行
+    test_new_interface()
+    test_legacy_interface()
+    test_error_cases()
+    
+    print("\n\nテスト完了")

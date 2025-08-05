@@ -1,20 +1,19 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 import tempfile
 import os
 import whisper
 import uvicorn
 import json
 from datetime import datetime
-import glob
 import aiohttp
 import asyncio
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import logging
 import time
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 import boto3
 from botocore.exceptions import ClientError
 
@@ -75,21 +74,33 @@ print("Whisper baseモデル読み込み完了（サーバーリソース制約�
 
 # リクエストボディのモデル
 class FetchAndTranscribeRequest(BaseModel):
-    file_paths: List[str]  # 必須: 処理対象のfile_pathリスト
+    # 新しいインターフェース
+    device_id: Optional[str] = None  # デバイスID
+    local_date: Optional[str] = None  # 日付（YYYY-MM-DD形式）
+    time_blocks: Optional[List[str]] = None  # 特定の時間ブロック（指定しない場合は全時間帯）
+    
+    # 既存のインターフェース（後方互換性）
+    file_paths: Optional[List[str]] = None  # 直接file_pathを指定
+    
+    # 共通パラメータ
     model: str = "base"  # baseモデルのみサポート
+    
+    @model_validator(mode='after')
+    def validate_request(self):
+        # どちらかのインターフェースが必要
+        if self.device_id and self.local_date:
+            # 新インターフェース
+            return self
+        elif self.file_paths:
+            # 既存インターフェース
+            return self
+        else:
+            raise ValueError("device_id + local_date または file_paths のどちらかを指定してください")
 
-
-def extract_time_block_from_path(file_path: str) -> str:
-    """file_pathからtime_blockを抽出"""
-    # 例: files/device_id/2025-07-18/21-00/audio.wav → 21-00
-    parts = file_path.split('/')
-    if len(parts) >= 4:
-        return parts[-2]  # time_block部分を取得
-    return None
 
 @app.post("/fetch-and-transcribe")
 async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
-    """WatchMeシステムのメイン処理エンドポイント（audio_filesテーブル経由版）"""
+    """WatchMeシステムのメイン処理エンドポイント（device_id/local_date/time_blocks対応版）"""
     start_time = time.time()
     
     # サポートされているモデルの確認
@@ -109,8 +120,66 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
             detail=f"モデル {request.model} が読み込まれていません"
         )
     
-    # file_pathsパラメータを確認
-    if not request.file_paths or len(request.file_paths) == 0:
+    # リクエストの処理
+    if request.device_id and request.local_date:
+        # 新しいインターフェース: device_id + local_date + time_blocks
+        logger.info(f"新インターフェース使用: device_id={request.device_id}, local_date={request.local_date}, time_blocks={request.time_blocks}")
+        
+        # audio_filesテーブルから該当するファイルを検索
+        query = supabase.table('audio_files') \
+            .select('file_path, device_id, recorded_at, local_date, time_block, transcriptions_status') \
+            .eq('device_id', request.device_id) \
+            .eq('local_date', request.local_date) \
+            .eq('transcriptions_status', 'pending')
+        
+        # time_blocksが指定されている場合はフィルタを追加
+        if request.time_blocks:
+            query = query.in_('time_block', request.time_blocks)
+        
+        # クエリ実行
+        try:
+            response = query.execute()
+            audio_files = response.data
+            logger.info(f"audio_filesテーブルから{len(audio_files)}件のファイルを取得")
+        except Exception as e:
+            logger.error(f"audio_filesテーブルのクエリエラー: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"データベースクエリエラー: {str(e)}")
+        
+        # file_pathsリストを構築
+        file_paths = [file['file_path'] for file in audio_files]
+        
+        if not file_paths:
+            execution_time = time.time() - start_time
+            return {
+                "status": "success",
+                "summary": {
+                    "total_files": 0,
+                    "already_completed": 0,
+                    "pending_processed": 0,
+                    "errors": 0
+                },
+                "device_id": request.device_id,
+                "local_date": request.local_date,
+                "time_blocks_requested": request.time_blocks,
+                "processed_time_blocks": [],
+                "execution_time_seconds": round(execution_time, 1),
+                "message": "処理対象のファイルがありません（全て処理済みまたは該当なし）"
+            }
+    
+    elif request.file_paths:
+        # 既存のインターフェース: file_pathsを直接指定
+        logger.info(f"既存インターフェース使用: file_paths={len(request.file_paths)}件")
+        file_paths = request.file_paths
+        audio_files = None  # 後方互換性のため
+    
+    else:
+        # ここに来ることはない（model_validatorで検証済み）
+        raise HTTPException(
+            status_code=400,
+            detail="device_id + local_dateまたはfile_pathsのどちらかを指定してください"
+        )
+    
+    if not file_paths:
         # file_pathsが空の場合は、処理対象なしとして正常終了
         execution_time = time.time() - start_time
         
@@ -127,31 +196,45 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
             "message": "処理対象のファイルがありません"
         }
     
-    logger.info(f"file_pathsパラメータ: {len(request.file_paths)}件のファイルを処理")
+    logger.info(f"処理対象: {len(file_paths)}件のファイル")
     
-    # 提供されたfile_pathsを使って処理対象ファイルを構築
+    # 処理対象ファイルの情報を構築
     files_to_process = []
     device_ids = set()
     dates = set()
     
-    for file_path in request.file_paths:
-        # file_pathから情報を抽出
-        # 例: files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/14-30/audio.wav
-        parts = file_path.split('/')
-        if len(parts) >= 5:
-            device_id = parts[1]  # d067d407-cf73-4174-a9c1-d91fb60d64d0
-            date_part = parts[2]  # 2025-07-19
-            time_part = parts[3]  # 14-30
-            
-            device_ids.add(device_id)
-            dates.add(date_part)
-            
+    # 新インターフェースの場合
+    if audio_files:
+        for audio_file in audio_files:
             files_to_process.append({
-                'file_path': file_path,
-                'device_id': device_id,
-                'date': date_part,
-                'time_block': time_part
+                'file_path': audio_file['file_path'],
+                'device_id': audio_file['device_id'],
+                'local_date': audio_file['local_date'],
+                'time_block': audio_file['time_block']
             })
+            device_ids.add(audio_file['device_id'])
+            dates.add(audio_file['local_date'])
+    
+    # 既存インターフェースの場合（file_pathから情報を抽出）
+    else:
+        for file_path in file_paths:
+            # file_pathから情報を抽出
+            # 例: files/d067d407-cf73-4174-a9c1-d91fb60d64d0/2025-07-19/14-30/audio.wav
+            parts = file_path.split('/')
+            if len(parts) >= 5:
+                device_id = parts[1]  # d067d407-cf73-4174-a9c1-d91fb60d64d0
+                date_part = parts[2]  # 2025-07-19
+                time_part = parts[3]  # 14-30
+                
+                device_ids.add(device_id)
+                dates.add(date_part)
+                
+                files_to_process.append({
+                    'file_path': file_path,
+                    'device_id': device_id,
+                    'local_date': date_part,
+                    'time_block': time_part
+                })
     
     # 実際の音声ダウンロードと文字起こし処理
     # 処理結果を記録
@@ -161,16 +244,10 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
     for audio_file in files_to_process:
         try:
             file_path = audio_file['file_path']
-            time_block = extract_time_block_from_path(file_path)
-            
-            if not time_block:
-                logger.error(f"time_blockの抽出に失敗: {file_path}")
-                error_files.append(audio_file)
-                continue
-            
-            # file_pathから日付を抽出
-            parts = file_path.split('/')
-            date_part = parts[2] if len(parts) >= 4 else None
+            # 新インターフェースの場合は既に情報があるので、抽出不要
+            time_block = audio_file['time_block']
+            local_date = audio_file['local_date']
+            device_id = audio_file['device_id']
             
             # 一時ファイルに音声データをダウンロード
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
@@ -186,8 +263,8 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
                     
                     # vibe_whisperテーブルに保存（空の文字起こし結果も保存）
                     data = {
-                        "device_id": audio_file['device_id'],
-                        "date": date_part,  # file_pathから抽出した日付
+                        "device_id": device_id,
+                        "date": local_date,  # リクエストから受け取った日付をそのまま使用
                         "time_block": time_block,
                         "transcription": transcription if transcription else ""
                     }
@@ -251,30 +328,62 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
     # 処理結果を返す
     execution_time = time.time() - start_time
     
-    return {
-        "status": "success",
-        "summary": {
-            "total_files": len(request.file_paths),
-            "pending_processed": len(successfully_transcribed),
-            "errors": len(error_files)
-        },
-        "processed_files": [f['file_path'] for f in successfully_transcribed],
-        "processed_time_blocks": [f['time_block'] for f in successfully_transcribed],
-        "error_files": [f['file_path'] for f in error_files] if error_files else None,
-        "execution_time_seconds": round(execution_time, 1),
-        "message": f"{len(request.file_paths)}件中{len(successfully_transcribed)}件を正常に処理しました"
-    }
+    # レスポンスの構築（インターフェースによって異なる）
+    if request.device_id and request.local_date:
+        # 新インターフェースのレスポンス
+        return {
+            "status": "success",
+            "summary": {
+                "total_files": len(file_paths),
+                "pending_processed": len(successfully_transcribed),
+                "errors": len(error_files)
+            },
+            "device_id": request.device_id,
+            "local_date": request.local_date,
+            "time_blocks_requested": request.time_blocks,
+            "processed_time_blocks": [f['time_block'] for f in successfully_transcribed],
+            "error_time_blocks": [f['time_block'] for f in error_files] if error_files else None,
+            "execution_time_seconds": round(execution_time, 1),
+            "message": f"{len(file_paths)}件中{len(successfully_transcribed)}件を正常に処理しました"
+        }
+    else:
+        # 既存インターフェースのレスポンス（後方互換性）
+        return {
+            "status": "success",
+            "summary": {
+                "total_files": len(file_paths),
+                "pending_processed": len(successfully_transcribed),
+                "errors": len(error_files)
+            },
+            "processed_files": [f['file_path'] for f in successfully_transcribed],
+            "processed_time_blocks": [f['time_block'] for f in successfully_transcribed],
+            "error_files": [f['file_path'] for f in error_files] if error_files else None,
+            "execution_time_seconds": round(execution_time, 1),
+            "message": f"{len(file_paths)}件中{len(successfully_transcribed)}件を正常に処理しました"
+        }
 
 @app.get("/")
 def read_root():
     return {
         "name": "Whisper API for WatchMe",
-        "version": "1.0.0",
-        "description": "音声文字起こしAPI - Supabase統合版",
+        "version": "2.0.0",
+        "description": "音声文字起こしAPI - Supabase統合版（local_date/time_block対応）",
         "endpoints": {
             "main": "/fetch-and-transcribe",
             "docs": "/docs"
-        }
+        },
+        "parameters": {
+            "device_id": "デバイスID（必須）",
+            "local_date": "日付 YYYY-MM-DD形式（必須）",
+            "time_blocks": "時間ブロックのリスト（オプション、省略時は全時間帯）",
+            "model": "Whisperモデル（デフォルト: base）"
+        },
+        "features": [
+            "local_date/time_blockベースの効率的な処理",
+            "Supabaseインデックスを活用した高速検索",
+            "S3とSupabaseの統合",
+            "バッチ処理サポート"
+        ]
     }
 
 if __name__ == "__main__":
