@@ -16,6 +16,10 @@ import time
 from typing import List, Dict, Set, Optional
 import boto3
 from botocore.exceptions import ClientError
+import numpy as np
+import soundfile as sf
+import re
+from collections import Counter
 
 # ロギング設定
 logging.basicConfig(level=logging.INFO)
@@ -257,9 +261,68 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
                     # S3からファイルをダウンロード（file_pathをそのまま使用）
                     s3_client.download_file(s3_bucket_name, file_path, tmp_file_path)
                     
-                    # Whisperで文字起こし
-                    result = whisper_model.transcribe(tmp_file_path, language="ja")
-                    transcription = result["text"].strip()
+                    # 音声ファイルを読み込んで分析
+                    try:
+                        audio_data, sample_rate = sf.read(tmp_file_path)
+                        
+                        # 音声のRMS（Root Mean Square）を計算して無音判定
+                        rms = np.sqrt(np.mean(audio_data**2))
+                        
+                        # 無音の閾値（実験的に調整が必要）
+                        silence_threshold = 0.0005  # より厳しい閾値に変更
+                        
+                        if rms < silence_threshold:
+                            logger.info(f"🔇 無音検出: RMS={rms:.6f} < {silence_threshold}")
+                            transcription = ""  # 無音の場合は空文字
+                        else:
+                            # Whisperで文字起こし
+                            result = whisper_model.transcribe(tmp_file_path, language="ja")
+                            transcription = result["text"].strip()
+                            
+                            # ハルシネーション検出（同じフレーズの繰り返し）
+                            if transcription:
+                                # 句読点で分割してセグメントを抽出
+                                segments = re.split(r'[、。，．,.]', transcription)
+                                segments = [s.strip() for s in segments if s.strip()]
+                                
+                                if segments:
+                                    # セグメントの繰り返しを検出
+                                    segment_counts = Counter(segments)
+                                    most_common_segment, count = segment_counts.most_common(1)[0]
+                                    
+                                    # 同じセグメントが10回以上繰り返される場合はハルシネーション
+                                    if count >= 10:
+                                        logger.warning(f"⚠️ ハルシネーション検出: '{most_common_segment}'が{count}回繰り返し")
+                                        transcription = ""  # ハルシネーションの場合は空文字
+                                    # 同じセグメントが全体の70%以上を占める場合もハルシネーション
+                                    elif len(segments) >= 5 and count >= len(segments) * 0.7:
+                                        logger.warning(f"⚠️ ハルシネーション検出: '{most_common_segment}'が全体の{count/len(segments)*100:.1f}%")
+                                        transcription = ""  # ハルシネーションの場合は空文字
+                                
+                                # 短いフレーズパターンの検出（日本語対応）
+                                if transcription:  # まだ空でない場合
+                                    # 日本語のフレーズパターンを抽出
+                                    pattern = r'([\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf]+[がのはをにでと]*)'
+                                    phrases = re.findall(pattern, transcription)
+                                    if phrases:
+                                        phrase_counts = Counter(phrases)
+                                        for phrase, count in phrase_counts.items():
+                                            if len(phrase) >= 2 and count >= 10:
+                                                logger.warning(f"⚠️ フレーズの過度な繰り返し検出: '{phrase}'が{count}回")
+                                                transcription = ""  # 繰り返しの場合は空文字
+                                                break
+                            
+                            # ログレベルの確認（no_speech_probが高い場合）
+                            if 'no_speech_prob' in result and result['no_speech_prob'] > 0.9:
+                                logger.info(f"📊 高い無音確率: no_speech_prob={result['no_speech_prob']:.2f}")
+                                if not transcription or len(transcription) < 5:
+                                    transcription = ""  # 無音確率が高く短いテキストは無視
+                    
+                    except Exception as audio_error:
+                        logger.error(f"音声分析エラー: {str(audio_error)}")
+                        # 音声分析に失敗した場合は通常のWhisper処理にフォールバック
+                        result = whisper_model.transcribe(tmp_file_path, language="ja")
+                        transcription = result["text"].strip()
                     
                     # vibe_whisperテーブルに保存（空の文字起こし結果も保存）
                     data = {

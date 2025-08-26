@@ -7,4 +7,7 @@ requests==2.32.3
 pydantic==2.11.5
 python-dotenv==1.1.0
 supabase==2.13.0
-boto3==1.35.86 
+boto3==1.35.86
+numpy>=1.24.0
+soundfile>=0.12.0
+scipy>=1.10.0
