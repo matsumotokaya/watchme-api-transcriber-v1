@@ -27,12 +27,12 @@ services:
         max-size: "10m"
         max-file: "3"
     networks:
-      - whisper_network
+      - watchme-network
 
 volumes:
   whisper_cache:
     driver: local
 
 networks:
-  whisper_network:
-    driver: bridge 
+  watchme-network:
+    external: true 

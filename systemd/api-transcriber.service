@@ -1,7 +1,7 @@
 [Unit]
 Description=Whisper Transcriber API Service (ECR)
-After=docker.service
-Requires=docker.service
+After=docker.service watchme-infrastructure.service
+Requires=docker.service watchme-infrastructure.service
 
 [Service]
 Type=simple
@@ -23,9 +23,10 @@ ExecStartPre=/bin/bash -c 'docker stop ${CONTAINER_NAME} || true'
 ExecStartPre=/bin/bash -c 'docker rm ${CONTAINER_NAME} || true'
 ExecStartPre=/bin/bash -c 'docker pull ${ECR_URI}'
 
-# コンテナ起動
+# コンテナ起動（watchme-networkに接続）
 ExecStart=/usr/bin/docker run --rm \
   --name ${CONTAINER_NAME} \
+  --network watchme-network \
   -p 8001:8001 \
   --env-file /home/ubuntu/api_whisper_v1/.env \
   --health-cmd="curl -f http://localhost:8001/ || exit 1" \

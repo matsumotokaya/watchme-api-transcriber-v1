@@ -236,6 +236,27 @@ nohup python3 main.py > api.log 2>&1 &
 
 ## デプロイ
 
+### ⚠️ 重要：ネットワーク管理体制の変更（2025年8月）
+
+**watchme-network** の管理が `watchme-server-configs` リポジトリの `docker-compose.infra.yml` に一元化されました。
+
+#### 前提条件
+1. **インフラストラクチャの起動**
+   ```bash
+   # EC2サーバー上で実行（初回のみ）
+   cd /home/ubuntu/watchme-server-configs
+   docker-compose -f docker-compose.infra.yml up -d
+   ```
+
+2. **ネットワーク接続の確認**
+   ```bash
+   # ネットワーク状態を確認
+   bash /home/ubuntu/watchme-server-configs/scripts/check-infrastructure.sh
+   
+   # 問題がある場合は自動修復
+   python3 /home/ubuntu/watchme-server-configs/scripts/network_monitor.py --fix
+   ```
+
 ### 推奨デプロイフロー（ECRベース）
 
 ECR（Elastic Container Registry）を使用したデプロイ方法が推奨です：
@@ -296,10 +317,39 @@ sudo systemctl disable api-transcriber  # 無効化
 
 ローカルでの開発やテストには `docker-compose` を使用します。
 
-```bash
-# .env ファイルを準備した後、コンテナをビルドして起動
-docker-compose up --build -d
+#### ⚠️ 注意：watchme-networkの設定
+`docker-compose.yml` は以下のように設定されています：
+- ネットワーク名: `watchme-network`
+- 設定: `external: true`（既存のネットワークを利用）
 
+これは本番環境と同じ構成のため、ローカル開発時は以下のいずれかの対応が必要です：
+
+**オプション1: ローカル用watchme-networkを作成**
+```bash
+# ローカル環境でwatchme-networkを作成
+docker network create watchme-network
+
+# その後、通常通り起動
+docker-compose up --build -d
+```
+
+**オプション2: ローカル開発用の設定を使用**
+```bash
+# docker-compose.override.yml を作成（gitignoreに追加済み）
+cat > docker-compose.override.yml << 'EOF'
+version: '3.8'
+
+networks:
+  watchme-network:
+    external: false
+    driver: bridge
+EOF
+
+# 通常通り起動
+docker-compose up --build -d
+```
+
+```bash
 # ログの確認
 docker-compose logs -f
 
@@ -588,6 +638,14 @@ if phrase_count >= 10:
 - **処理速度**: 1分音声で約2-3秒（base モデル）
 
 ## 最近の改善内容
+
+### 2025年8月29日の改善
+
+1. **watchme-networkインフラ管理体制への移行**
+   - `docker-compose.yml`を`external: true`設定に変更
+   - `systemd/api-transcriber.service`に`watchme-infrastructure.service`依存関係を追加
+   - コンテナ起動時に`--network watchme-network`を明示的に指定
+   - ローカル開発環境用のネットワーク設定ガイドを追加
 
 ### 2025年8月の改善
 
