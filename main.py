@@ -273,63 +273,68 @@ async def fetch_and_transcribe(request: FetchAndTranscribeRequest):
                         
                         if rms < silence_threshold:
                             logger.info(f"🔇 無音検出: RMS={rms:.6f} < {silence_threshold}")
-                            transcription = ""  # 無音の場合は空文字
+                            transcription = "発話なし"  # 無音の場合は明示的に記録
                         else:
-                            # Whisperで文字起こし
-                            result = whisper_model.transcribe(tmp_file_path, language="ja")
-                            transcription = result["text"].strip()
+                            # Whisperで文字起こし（パラメータチューニング済み）
+                            result = whisper_model.transcribe(
+                                tmp_file_path,
+                                language="ja",
+                                temperature=0.0,  # 0.0にすると最も確実な予測のみ（ハルシネーション減少）
+                                compression_ratio_threshold=2.4,  # 圧縮率が高い場合は無効化
+                                logprob_threshold=-1.0,  # 確率が低い予測を除外
+                                no_speech_threshold=0.6,  # 無音判定の閾値を厳しく
+                                condition_on_previous_text=False  # 前のテキストに影響されない
+                            )
                             
-                            # ハルシネーション検出（同じフレーズの繰り返し）
-                            if transcription:
-                                # 句読点で分割してセグメントを抽出
-                                segments = re.split(r'[、。，．,.]', transcription)
-                                segments = [s.strip() for s in segments if s.strip()]
-                                
-                                if segments:
-                                    # セグメントの繰り返しを検出
-                                    segment_counts = Counter(segments)
-                                    most_common_segment, count = segment_counts.most_common(1)[0]
-                                    
-                                    # 同じセグメントが10回以上繰り返される場合はハルシネーション
-                                    if count >= 10:
-                                        logger.warning(f"⚠️ ハルシネーション検出: '{most_common_segment}'が{count}回繰り返し")
-                                        transcription = ""  # ハルシネーションの場合は空文字
-                                    # 同じセグメントが全体の70%以上を占める場合もハルシネーション
-                                    elif len(segments) >= 5 and count >= len(segments) * 0.7:
-                                        logger.warning(f"⚠️ ハルシネーション検出: '{most_common_segment}'が全体の{count/len(segments)*100:.1f}%")
-                                        transcription = ""  # ハルシネーションの場合は空文字
-                                
-                                # 短いフレーズパターンの検出（日本語対応）
-                                if transcription:  # まだ空でない場合
-                                    # 日本語のフレーズパターンを抽出
-                                    pattern = r'([\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf]+[がのはをにでと]*)'
-                                    phrases = re.findall(pattern, transcription)
-                                    if phrases:
-                                        phrase_counts = Counter(phrases)
-                                        for phrase, count in phrase_counts.items():
-                                            if len(phrase) >= 2 and count >= 10:
-                                                logger.warning(f"⚠️ フレーズの過度な繰り返し検出: '{phrase}'が{count}回")
-                                                transcription = ""  # 繰り返しの場合は空文字
-                                                break
+                            # ログ出力（デバッグ用）
+                            logger.info(f"📊 Whisper結果: text='{result['text'][:50] if result['text'] else ''}'...")
+                            logger.info(f"📊 Whisperメタデータ: {list(result.keys())}")
                             
-                            # ログレベルの確認（no_speech_probが高い場合）
-                            if 'no_speech_prob' in result and result['no_speech_prob'] > 0.9:
-                                logger.info(f"📊 高い無音確率: no_speech_prob={result['no_speech_prob']:.2f}")
-                                if not transcription or len(transcription) < 5:
-                                    transcription = ""  # 無音確率が高く短いテキストは無視
+                            # segmentsの中にno_speech情報がある場合
+                            avg_no_speech = 0
+                            if 'segments' in result and result['segments']:
+                                avg_no_speech = sum(s.get('no_speech_prob', 0) for s in result['segments']) / len(result['segments'])
+                                logger.info(f"📊 平均no_speech_prob: {avg_no_speech:.3f}")
+                            
+                            # no_speech_probが高い場合は「発話なし」として記録
+                            # resultに直接no_speech_probがない場合は、segmentsの平均値を使用
+                            no_speech_threshold = 0.8
+                            if result.get('no_speech_prob', avg_no_speech) > no_speech_threshold:
+                                logger.info(f"📊 高い無音確率検出: {result.get('no_speech_prob', avg_no_speech):.2f} > {no_speech_threshold}")
+                                transcription = "発話なし"
+                            elif not result["text"].strip():
+                                transcription = "発話なし"
+                            else:
+                                transcription = result["text"].strip()
                     
                     except Exception as audio_error:
                         logger.error(f"音声分析エラー: {str(audio_error)}")
-                        # 音声分析に失敗した場合は通常のWhisper処理にフォールバック
-                        result = whisper_model.transcribe(tmp_file_path, language="ja")
-                        transcription = result["text"].strip()
+                        # 音声分析に失敗した場合も同じパラメータでWhisper処理
+                        result = whisper_model.transcribe(
+                            tmp_file_path,
+                            language="ja",
+                            temperature=0.0,
+                            compression_ratio_threshold=2.4,
+                            logprob_threshold=-1.0,
+                            no_speech_threshold=0.6,
+                            condition_on_previous_text=False
+                        )
+                        # segmentsの平均値を計算
+                        avg_no_speech = 0
+                        if 'segments' in result and result['segments']:
+                            avg_no_speech = sum(s.get('no_speech_prob', 0) for s in result['segments']) / len(result['segments'])
+                        
+                        if result.get('no_speech_prob', avg_no_speech) > 0.8 or not result["text"].strip():
+                            transcription = "発話なし"
+                        else:
+                            transcription = result["text"].strip()
                     
-                    # vibe_whisperテーブルに保存（空の文字起こし結果も保存）
+                    # vibe_whisperテーブルに保存（「発話なし」も明示的に保存）
                     data = {
                         "device_id": device_id,
                         "date": local_date,  # リクエストから受け取った日付をそのまま使用
                         "time_block": time_block,
-                        "transcription": transcription if transcription else ""
+                        "transcription": transcription
                     }
                     
                     # upsert（既存データは更新、新規データは挿入）

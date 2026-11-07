@@ -1,5 +1,26 @@
 #!/bin/bash
 
+# --- 依存関係の安全確認 ---
+echo "==> 依存サービス(watchme-infrastructure.service)の稼働状況を確認中..."
+
+# スクリプト内の変数を利用してSSH接続
+KEY_PATH="~/watchme-key.pem"
+EC2_USER="ubuntu"
+EC2_HOST="3.24.16.82"
+
+ssh -i ${KEY_PATH} ${EC2_USER}@${EC2_HOST} "systemctl is-active --quiet watchme-infrastructure.service"
+if [ $? -ne 0 ]; then
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  echo "[エラー] 依存する 'watchme-infrastructure.service' が稼働していません！"
+  echo "先に watchme-server-configs のセットアップを実行してください。"
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  exit 1
+fi
+echo "==> 依存サービスの確認OK。デプロイを続行します。"
+echo ""
+# --- 安全確認ここまで ---
+
+
 # ECRベースのデプロイスクリプト
 # 使用方法: ./deploy-ecr.sh [TAG]
 

@@ -578,64 +578,51 @@ APIリクエストがタイムアウトしても、バックグラウンドで�
 OpenAI Whisperモデルには、ノイズのみの音声データに対して実在しない言葉を生成する「ハルシネーション」という既知の問題があります。
 
 #### 観察された現象
-- **症状**: ノイズや無音の音声ファイルに対して「スタッフの方が」「上に」などの言葉を大量に繰り返し生成
+- **症状**: ノイズや無音の音声ファイルに対して「スタッフの音が出てくる」などの言葉を繰り返し生成
 - **再現性**: 100%に近い確率で発生
-- **例**: 1分間のノイズ音声 → 「スタッフの上に、上に、上に...」×146回
 
-### 実装済みの対策（2025年8月26日）
+### 実装済みの対策（2025年8月30日更新）
 
-#### 1. 繰り返し検出によるフィルタリング
+#### 現在の実装方式
 ```python
-# 句読点で分割してセグメントの繰り返しを検出
-segments = re.split(r'[、。，．,.]', transcription)
-if count >= 10:  # 同じセグメントが10回以上
-    transcription = ""  # 空文字として保存
+# Whisperパラメータチューニング
+result = whisper_model.transcribe(
+    audio_path,
+    language="ja",
+    temperature=0.0,              # ハルシネーション減少
+    compression_ratio_threshold=2.4,
+    logprob_threshold=-1.0,
+    no_speech_threshold=0.6,
+    condition_on_previous_text=False
+)
+
+# no_speech_probベースの判定
+# セグメントごとのno_speech_probの平均を計算
+avg_no_speech = sum(segment['no_speech_prob'] for segment in segments) / len(segments)
+
+# 80%以上の無音確率で「発話なし」と判定
+if avg_no_speech > 0.8:
+    transcription = "発話なし"
+else:
+    transcription = result["text"]
 ```
 
-#### 2. RMS（Root Mean Square）による音声レベル判定
-```python
-rms = np.sqrt(np.mean(audio_data**2))
-if rms < 0.0005:  # 極めて低い音声レベル
-    transcription = ""  # 無音として処理
-```
+#### 修正内容
+1. **対症療法的なパターンマッチングを削除**（繰り返し検出、フレーズパターン検出）
+2. **Whisperパラメータの最適化**でハルシネーションを抑制
+3. **no_speech_prob（無音確率）による判定**を採用
+4. **「発話なし」を明示的に記録**（空文字ではなく）
 
-#### 3. 日本語フレーズパターンの異常検出
-```python
-# 同じ日本語フレーズが過度に繰り返される場合
-pattern = r'([\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf]+[がのはをにでと]*)'
-if phrase_count >= 10:
-    transcription = ""  # ハルシネーションとして除外
-```
+#### 動作仕様
+- **判定基準**: セグメントごとのno_speech_probの平均が80%以上
+- **結果**: 
+  - ノイズのみ → 「発話なし」として保存
+  - 実際の発話 → 書き起こし内容を保存
 
-### 現状の課題と限界
-
-#### ルールベースアプローチの限界
-1. **本質的解決ではない**: Whisperモデル自体のバグは修正できない
-2. **誤検出リスク**: 正当な繰り返し表現も削除される可能性
-3. **網羅性の欠如**: 「スタッフ」以外の単語でも同様の問題が起きる可能性
-
-#### 技術的制約
-- ローカルWhisperモデル（base）での限界
-- VAD（Voice Activity Detection）の精度不足
-- メモリ制約によるモデルサイズの制限（EC2 t4g.small）
-
-### 今後の改善方針
-
-#### Phase 1: ローカルWhisperの限界までチューニング
-- [ ] Whisperのパラメータ最適化（temperature, beam_size等）
-- [ ] より高精度なVADライブラリの導入（webrtcVAD, sileroVAD）
-- [ ] 信頼度スコアベースのフィルタリング
-
-#### Phase 2: 外部APIへの移行検討
-実用レベルに達しない場合は以下を検討：
-- **Azure Speech Services**: 商用グレードの音声認識
-- **Google Cloud Speech-to-Text**: 高精度な日本語対応
-- **Amazon Transcribe**: AWS環境との親和性
-
-### パフォーマンス指標
-- **現在の誤検出率**: 約100%（ノイズ音声に対して）
-- **目標誤検出率**: 5%以下
-- **処理速度**: 1分音声で約2-3秒（base モデル）
+#### 注意事項
+⚠️ **短い発話が埋もれるリスク**: 
+- 2分間の録音で「はい」など短い発話のみの場合、無音セグメントの割合が高いため「発話なし」と判定される可能性があります
+- このトレードオフは、ハルシネーション防止を優先した設計によるものです
 
 ## 最近の改善内容
 
